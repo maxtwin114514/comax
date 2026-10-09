@@ -8,7 +8,6 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
 
-import com.termux.BuildConfig;
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxConstants;
 
@@ -484,7 +483,6 @@ public class CoomiService extends Service {
             mEnginePort = port;
             mIsEngineRunning = true;
             startBundledRuntimeInstallWhenReady(mEngineProcess, port, token);
-            reportDailyActive();
 
             Process process = mEngineProcess;
             new Thread(() -> {
@@ -509,27 +507,6 @@ public class CoomiService extends Service {
         } finally {
             mIsEngineStarting = false;
         }
-    }
-
-    private void reportDailyActive() {
-        new Thread(() -> {
-            HttpURLConnection connection = null;
-            try {
-                connection = (HttpURLConnection) new URL("https://updates.septemc.com/coomi/feedback/api/stats/dau").openConnection();
-                connection.setRequestMethod("POST");
-                connection.setConnectTimeout(4000);
-                connection.setReadTimeout(4000);
-                connection.setDoOutput(true);
-                connection.setRequestProperty("X-Coomi-Version", BuildConfig.VERSION_NAME);
-                connection.setFixedLengthStreamingMode(0);
-                connection.getOutputStream().close();
-                connection.getResponseCode();
-            } catch (Exception e) {
-                Logger.logDebug(LOG_TAG, "DAU report skipped: " + e.getMessage());
-            } finally {
-                if (connection != null) connection.disconnect();
-            }
-        }, "coomi-dau").start();
     }
 
     private synchronized File ensureCurrentWebAssets() throws Exception {

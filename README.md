@@ -22,7 +22,7 @@
   <a href="https://qm.qq.com/q/2JVYVRKnBe"><strong>💬 QQ 交流群 1108467806</strong></a>
 </p>
 
-- 最新版：**v1.5.1o3**（versionCode 77）
+- 最新版：**v1.5.2-flash**（versionCode 78）
 - 官网：https://api.monai.ccwu.cc/coomi/
 - GitHub：https://github.com/maxtwin114514/comax
 
@@ -73,7 +73,7 @@ Comax-Android/
 
 ## 构建
 
-最新版更新见 [1.5.1o3 更新说明](RELEASE_NOTES_v1.5.1o3.md)。余额和报价依赖服务商接口，Token 费用仅为估算；Shizuku 需用户授权，悬浮窗输入法和控制能力需真机验证。
+最新版更新见 [1.5.2-flash 更新说明](RELEASE_NOTES_v1.5.2-flash.md)。余额和报价依赖服务商接口，Token 费用仅为估算；系统默认助理、悬浮窗输入法和控制能力需真机验证。
 
 参见仓库内 `docs/` 与各模块说明；主要工具链：Android SDK（API 34）、Rust stable-aarch64-linux-android、Node 22 + Vue 3/Vite。
 
