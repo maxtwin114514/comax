@@ -5,6 +5,10 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.os.Bundle;
+import android.os.Build;
+import android.os.FileObserver;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -17,18 +21,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 控制模式的屏幕操控后端（无障碍）。
  *
- * <p>控制模式需要「看见屏幕 + 动屏幕」两件事。Shizuku 能跑 input，但依赖用户额外装
- * Shizuku 并常驻后台，且读不到界面结构；无障碍是本机自带能力，申请一次即可长期使用，
- * 还能按文字/控件直接定位，比坐标点击稳得多。因此控制模式优先走无障碍，Shizuku 只作为
- * 无障碍不可用时的回退。</p>
- *
- * <p>本服务只做三件被显式要求的事：读当前前台包名、往输入框写入文本并发出去、按坐标做
- * 点击/滑动。不做全局监听上报，也不在后台自行发起操作。</p>
+ * <p>命令目录通过 FileObserver 唤醒轮询，250ms 兜底扫描仍保留。describeScreen 结果缓存 150ms，
+ * 无障碍事件或手势执行后立即失效。手势等待超时被限制在手势自身时长附近。
  */
 public final class CoomiAccessibilityService extends AccessibilityService {
 
@@ -44,6 +45,13 @@ public final class CoomiAccessibilityService extends AccessibilityService {
     /** 命令队列轮询线程：让引擎侧的工具能真正驱动屏幕。 */
     private volatile boolean queueRunning = false;
     private Thread queueThread;
+    private volatile FileObserver fileObserver;
+
+    /** describeScreen 缓存（150ms） */
+    private final Object screenCacheLock = new Object();
+    private String cachedScreen;
+    private long cachedScreenAt;
+    private static final long SCREEN_CACHE_TTL_MS = 150;
 
     public static CoomiAccessibilityService get() {
         return instance;
@@ -91,19 +99,34 @@ public final class CoomiAccessibilityService extends AccessibilityService {
     // ── 命令队列 ────────────────────────────────────────────────────────
 
     /**
-     * 轮询命令目录并执行。
-     *
-     * <p>引擎（Rust 侧）跑在独立进程里，拿不到这里的无障碍 API；WebView 的 JS 桥又只存在于
-     * 前台界面。所以用「文件队列」把两边接起来：引擎写 {@code <id>.cmd.json}，这里执行完写
-     * {@code <id>.result.json}，引擎轮询结果。这样模型调用工具时能拿到真实返回值，
-     * 而不是发完就完事。</p>
+     * 轮询命令目录并执行。使用 FileObserver 唤醒，250ms 兜底扫描。
      */
     private void startQueue() {
         if (queueRunning) return;
         queueRunning = true;
+        setupFileObserver();
         queueThread = new Thread(this::queueLoop, "coomi-control-queue");
         queueThread.setDaemon(true);
         queueThread.start();
+    }
+
+    private void setupFileObserver() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        File dir = controlQueueDir();
+        if (dir == null) return;
+        try {
+            fileObserver = new FileObserver(dir, FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
+                @Override public void onEvent(int event, String path) {
+                    if (path != null && path.endsWith(".cmd.json")) {
+                        // 唤醒轮询线程立即处理
+                        if (queueThread != null) queueThread.interrupt();
+                    }
+                }
+            };
+            fileObserver.startWatching();
+        } catch (Throwable ignored) {
+            // FileObserver 失败时保留兜底扫描
+        }
     }
 
     private void queueLoop() {
@@ -116,6 +139,7 @@ public final class CoomiAccessibilityService extends AccessibilityService {
                     // 按文件名排序，保证同一批命令按写入顺序执行
                     java.util.Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
                     for (File file : files) {
+                        if (!queueRunning) break;
                         handleCommandFile(file);
                     }
                 }
@@ -125,8 +149,8 @@ public final class CoomiAccessibilityService extends AccessibilityService {
             try {
                 Thread.sleep(250L);
             } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                return;
+                // 被 FileObserver 唤醒，继续下一轮立即处理
+                Thread.interrupted();
             }
         }
     }
@@ -174,21 +198,37 @@ public final class CoomiAccessibilityService extends AccessibilityService {
                 return;
             }
             String action = command.optString("action", "");
-            CoomiFloatService.releaseForAutomation();
+            // 滑动前不收起窗口；点击/长按前才收起（避免误触目标应用）
+            if (!"swipe".equals(action)) {
+                CoomiFloatService.releaseForAutomation();
+            }
+            synchronized (screenCacheLock) { cachedScreen = null; }
             switch (action) {
                 case "tap":
-                    ok = tap((float) command.optDouble("x", 0), (float) command.optDouble("y", 0));
+                    float tx = (float) command.optDouble("x", 0);
+                    float ty = (float) command.optDouble("y", 0);
+                    CoomiFloatService svc = CoomiFloatService.getInstance();
+                    if (svc != null) svc.showTapAt(tx, ty);
+                    ok = tap(tx, ty);
                     output = ok ? "已点击" : "点击失败";
                     break;
                 case "long_press":
-                    ok = longPress((float) command.optDouble("x", 0),
-                        (float) command.optDouble("y", 0), command.optLong("durationMs", 800));
+                    float lx = (float) command.optDouble("x", 0);
+                    float ly = (float) command.optDouble("y", 0);
+                    CoomiFloatService svc2 = CoomiFloatService.getInstance();
+                    if (svc2 != null) svc2.showTapAt(lx, ly);
+                    ok = longPress(lx, ly, command.optLong("durationMs", 800));
                     output = ok ? "已长按" : "长按失败";
                     break;
                 case "swipe":
-                    ok = swipe((float) command.optDouble("x1", 0), (float) command.optDouble("y1", 0),
-                        (float) command.optDouble("x2", 0), (float) command.optDouble("y2", 0),
-                        command.optLong("durationMs", 300));
+                    float x1 = (float) command.optDouble("x1", 0);
+                    float y1 = (float) command.optDouble("y1", 0);
+                    float x2 = (float) command.optDouble("x2", 0);
+                    float y2 = (float) command.optDouble("y2", 0);
+                    long dur = command.optLong("durationMs", 300);
+                    CoomiFloatService svc3 = CoomiFloatService.getInstance();
+                    if (svc3 != null) svc3.showSwipeFrom(x1, y1, x2, y2);
+                    ok = swipe(x1, y1, x2, y2, dur);
                     output = ok ? "已滑动" : "滑动失败";
                     break;
                 case "text":
@@ -252,14 +292,35 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         }
     }
 
+    /** 使 describeScreen 缓存失效 */
+    public void invalidateScreenCache() {
+        synchronized (screenCacheLock) { cachedScreen = null; }
+    }
+
+    // ── 读界面 ──────────────────────────────────────────────────────────
 
     /**
      * 把当前屏幕上的可见文字读出来，供模型判断「现在在哪个界面、能点什么」。
      *
-     * <p>只取有文本或描述的可见节点，并按控件类型标注可点击性 —— 这是让模型能自己决定
-     * 下一步动作的关键信息，而不是让它盲点坐标。</p>
+     * <p>只取有文本或描述的可见节点，并按控件类型标注可点击性。150ms 缓存，
+     * 无障碍事件或手势后自动失效。</p>
      */
     public String describeScreen() {
+        synchronized (screenCacheLock) {
+            long now = System.currentTimeMillis();
+            if (cachedScreen != null && (now - cachedScreenAt) < SCREEN_CACHE_TTL_MS) {
+                return cachedScreen;
+            }
+        }
+        String result = describeScreenUncached();
+        synchronized (screenCacheLock) {
+            cachedScreen = result;
+            cachedScreenAt = System.currentTimeMillis();
+        }
+        return result;
+    }
+
+    private String describeScreenUncached() {
         StringBuilder builder = new StringBuilder();
         builder.append("前台应用: ").append(currentPackage()).append('\n');
         builder.append("屏幕尺寸(px): ").append(getResources().getDisplayMetrics().widthPixels)
@@ -320,6 +381,7 @@ public final class CoomiAccessibilityService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
+        invalidateScreenCache();
         if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
         CharSequence pkg = event.getPackageName();
         if (TextUtils.isEmpty(pkg)) return;
@@ -349,6 +411,10 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         if (queueThread != null) {
             queueThread.interrupt();
             queueThread = null;
+        }
+        if (fileObserver != null) {
+            fileObserver.stopWatching();
+            fileObserver = null;
         }
         if (instance == this) instance = null;
         super.onDestroy();
@@ -565,7 +631,7 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    // ── 动屏幕（手势，API 24+）────────────────────────────────────────
+    // ── 动屏幕（手势，API 24+） ────────────────────────────────────────
 
     /** 点击屏幕坐标。 */
     public boolean tap(float x, float y) {
@@ -574,7 +640,7 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         GestureDescription gesture = new GestureDescription.Builder()
             .addStroke(new GestureDescription.StrokeDescription(path, 0, 60))
             .build();
-        return dispatchAndWait(gesture);
+        return dispatchAndWait(gesture, 800);
     }
 
     /** 直线滑动（用于聊天列表滚动、翻页）。 */
@@ -586,17 +652,20 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         GestureDescription gesture = new GestureDescription.Builder()
             .addStroke(new GestureDescription.StrokeDescription(path, 0, duration))
             .build();
-        return dispatchAndWait(gesture);
+        long timeoutMs = Math.max(2000, duration + 1500);
+        return dispatchAndWait(gesture, timeoutMs);
     }
 
-
-    /** Never block Android's main looper waiting for its own gesture callback. */
-    private boolean dispatchAndWait(GestureDescription gesture) {
-        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return dispatchGesture(gesture, null, main);
+    /** 手势等待：超时按手势时长设定上限，不再统一等 5s */
+    private boolean dispatchAndWait(GestureDescription gesture, long timeoutMs) {
+        Handler main = new Handler(Looper.getMainLooper());
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            // 主线程直接 dispatch，无需等待回调
+            return dispatchGesture(gesture, null, main);
+        }
         CoomiFloatService.releaseForAutomation();
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-        java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean completed = new AtomicBoolean(false);
         main.post(() -> {
             try {
                 boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
@@ -606,7 +675,7 @@ public final class CoomiAccessibilityService extends AccessibilityService {
                 if (!accepted) latch.countDown();
             } catch (Throwable error) { latch.countDown(); }
         });
-        try { return latch.await(5000, java.util.concurrent.TimeUnit.MILLISECONDS) && completed.get(); }
+        try { return latch.await(timeoutMs, TimeUnit.MILLISECONDS) && completed.get(); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
     }
 
@@ -617,7 +686,8 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         GestureDescription gesture = new GestureDescription.Builder()
             .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(600L, Math.min(3000L, durationMs))))
             .build();
-        return dispatchAndWait(gesture);
+        long timeoutMs = Math.max(2000, durationMs + 1500);
+        return dispatchAndWait(gesture, timeoutMs);
     }
 
     /** 全局动作：back / home / recents / notifications。 */

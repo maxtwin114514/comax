@@ -760,6 +760,79 @@ public class CoomiService extends Service {
 
     public String getEngineToken() { return mEngineToken; }
 
+    /** Blocking loopback transcription used by the system assistant on its worker thread. */
+    public String[] transcribeAssistant(File audio, String provider, String model, String language) {
+        if (audio == null || !audio.isFile()) return new String[]{null, "录音文件不存在"};
+        if (audio.length() <= 44 || audio.length() > 16L * 1024L * 1024L) {
+            return new String[]{null, "录音大小无效"};
+        }
+        if (mEngineToken.isEmpty()) return new String[]{null, "Comax 引擎尚未就绪"};
+        HttpURLConnection connection = null;
+        String boundary = "----ComaxAssistant" + Long.toHexString(System.nanoTime());
+        try {
+            connection = (HttpURLConnection) new URL(
+                "http://127.0.0.1:" + mEnginePort + "/api/assistant/transcribe").openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(60000);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Authorization", "Bearer " + mEngineToken);
+            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+            try (java.io.OutputStream out = connection.getOutputStream()) {
+                writeMultipartText(out, boundary, "provider_id", provider);
+                writeMultipartText(out, boundary, "model", model);
+                writeMultipartText(out, boundary, "language", language);
+                out.write(("--" + boundary + "\r\n"
+                    + "Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n"
+                    + "Content-Type: audio/wav\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                try (InputStream input = new java.io.FileInputStream(audio)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) > 0) out.write(buffer, 0, read);
+                }
+                out.write(("\r\n--" + boundary + "--\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                ? connection.getInputStream() : connection.getErrorStream();
+            String payload = stream == null ? "" : readSmallResponse(stream, 256 * 1024);
+            org.json.JSONObject json = payload.isEmpty() ? new org.json.JSONObject() : new org.json.JSONObject(payload);
+            if (status >= 200 && status < 300) {
+                String text = json.optString("text", "").trim();
+                return text.isEmpty() ? new String[]{null, "语音服务没有返回文本"} : new String[]{text, null};
+            }
+            String error = json.optString("error", json.optString("message", "语音识别失败 HTTP " + status));
+            if (error.length() > 300) error = error.substring(0, 300) + "…";
+            return new String[]{null, error};
+        } catch (Exception error) {
+            return new String[]{null, "语音识别连接失败：" + error.getClass().getSimpleName()};
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static void writeMultipartText(java.io.OutputStream out, String boundary, String name, String value)
+        throws java.io.IOException {
+        String safe = value == null ? "" : value.replace("\r", "").replace("\n", "");
+        out.write(("--" + boundary + "\r\n"
+            + "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n"
+            + safe + "\r\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static String readSmallResponse(InputStream input, int limit) throws java.io.IOException {
+        try (InputStream stream = input; java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int total = 0;
+            int read;
+            while ((read = stream.read(buffer)) > 0 && total < limit) {
+                int keep = Math.min(read, limit - total);
+                output.write(buffer, 0, keep);
+                total += keep;
+            }
+            return new String(output.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
     /** Loopback authenticated submit; does not require the Activity/WebView to remain foreground. */
     public String submitControlTask(String session, String provider, String model, String text) {
         HttpURLConnection connection = null;

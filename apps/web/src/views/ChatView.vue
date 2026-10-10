@@ -61,6 +61,15 @@ function syncDigitalLifeMode() {
   if (!session.isBusy) session.syncLifeMode()
 }
 
+/** 页面重新可见：隐藏期间事件只在引擎侧累计，回来时一次性以权威快照恢复。 */
+function onVisibilityChange() {
+  if (document.hidden) return
+  if (session.runState === 'idle') return
+  void session.restoreFromEngine(session.sessionId).then(() => {
+    session.connect()
+  })
+}
+
 let ro: ResizeObserver | null = null
 
 onMounted(() => {
@@ -77,6 +86,9 @@ onMounted(() => {
   void config.syncGlobalMemoryFromEngine()
   syncDigitalLifeMode()
   window.addEventListener('focus', syncDigitalLifeMode)
+  // 后台返回时一次恢复权威快照：页面隐藏期间事件只 ACK 未渲染，
+  // 避免返回后逐字蹦出；这里拉完整会话一次铺好。
+  document.addEventListener('visibilitychange', onVisibilityChange)
   // 全局轮询各会话的「后台运行中」状态：切走会话后任务在引擎侧继续跑，
   // 抽屉/会话页据此显示转圈。轮询常驻（本地 API 开销极小），不依赖抽屉打开。
   void sessions.refreshRunning()
@@ -101,6 +113,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('coomi:flush-persistence', session.flushPersistence)
   window.removeEventListener('focus', syncDigitalLifeMode)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   session.flushPersistence()
   window.removeEventListener('touchstart', onMindMapTouchStart)
   window.removeEventListener('touchmove', onMindMapTouchMove)
@@ -216,7 +229,7 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
         </button>
       </Transition>
 
-      <LoopProgressBar v-if="session.loop.active" :loop="session.loop" />
+      <LoopProgressBar v-if="session.plan.active || (session.loop.active && session.plan.steps.length === 0)" />
       <div v-if="session.retryConfirmation" class="retry-confirm">
         <div><CoomiIcon name="alert" :size="16" /><span>{{ session.retryConfirmation }}</span></div>
         <div class="retry-actions">

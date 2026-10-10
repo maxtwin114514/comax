@@ -66,6 +66,7 @@ public class CoomiDashboardActivity extends Activity {
     private View mOpenChatButton;
     private View mAiStudioButton;
     private View mCollabButton;
+    private View mPhoneAssistantButton;
     private Button mRestartButton;
     private Button mStopButton;
     private View mOpenTerminalButton;
@@ -136,6 +137,7 @@ public class CoomiDashboardActivity extends Activity {
         mOpenChatButton = findViewById(R.id.btn_open_chat);
         mAiStudioButton = findViewById(R.id.btn_ai_studio);
         mCollabButton = findViewById(R.id.btn_collab);
+        mPhoneAssistantButton = findViewById(R.id.btn_phone_assistant);
         mRestartButton = findViewById(R.id.btn_restart);
         mStopButton = findViewById(R.id.btn_stop);
         mOpenTerminalButton = findViewById(R.id.btn_open_terminal);
@@ -166,6 +168,8 @@ public class CoomiDashboardActivity extends Activity {
         mOpenChatButton.setOnClickListener(v -> openChat());
         mAiStudioButton.setOnClickListener(v -> openCoomiRoute("#/studio"));
         mCollabButton.setOnClickListener(v -> openCoomiRoute("#/collab"));
+        mPhoneAssistantButton.setOnClickListener(v ->
+            startActivity(new Intent(this, app.coomi.assistant.CoomiAssistantSetupActivity.class)));
         mRestartButton.setOnClickListener(v -> restartEngine());
         mStopButton.setOnClickListener(v -> stopEngine());
         mOpenTuiButton.setOnClickListener(v -> openTui());

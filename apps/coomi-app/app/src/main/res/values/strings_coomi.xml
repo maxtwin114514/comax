@@ -111,6 +111,8 @@
     <string name="coomi_dash_ai_studio_desc">配置多个智能体，协同讨论、派单和执行任务</string>
     <string name="coomi_dash_collab">协同工作台</string>
     <string name="coomi_dash_collab_desc">并行拆解任务，查看成员执行流与交付产物</string>
+    <string name="coomi_dash_phone_assistant">手机助手</string>
+    <string name="coomi_dash_phone_assistant_desc">设为系统默认助理，通过语音调用 Comax 控制手机</string>
     <string name="coomi_dash_open_chat_desc">Coomi 的主界面</string>
     <string name="coomi_dash_restart">重启引擎</string>
     <string name="coomi_dash_stop">停止引擎</string>
@@ -216,6 +218,37 @@
     <string name="coomi_dash_toast_tui_hint">在终端里执行：coomi</string>
     <string name="coomi_dash_toast_no_browser">未找到可用的浏览器</string>
 
+    <!-- ===== 系统默认手机助手 ===== -->
+    <string name="coomi_assistant_title">手机助手</string>
+    <string name="coomi_assistant_summary">依次设置默认助理、麦克风和语音识别模型。长按电源键能否唤醒默认助理由手机系统决定。</string>
+    <string name="coomi_assistant_ready_summary">手机助手已就绪。系统唤醒 Comax 后会显示顶部语音胶囊，并把识别结果交给控制模式执行。</string>
+    <string name="coomi_assistant_section_permissions">系统接管与权限</string>
+    <string name="coomi_assistant_section_speech">语音识别</string>
+    <string name="coomi_assistant_default_role">系统默认助理</string>
+    <string name="coomi_assistant_microphone">麦克风</string>
+    <string name="coomi_assistant_accessibility">无障碍控制</string>
+    <string name="coomi_assistant_overlay">悬浮窗</string>
+    <string name="coomi_assistant_engine">Comax 引擎</string>
+    <string name="coomi_assistant_provider">转写服务商</string>
+    <string name="coomi_assistant_model">转写模型</string>
+    <string name="coomi_assistant_language">识别语言</string>
+    <string name="coomi_assistant_system_fallback">服务不可用时使用系统语音识别</string>
+    <string name="coomi_assistant_enable">开启手机助手</string>
+    <string name="coomi_assistant_model_hint">列表来自已配置的 Provider。所选模型必须支持 OpenAI 兼容的 audio/transcriptions 接口。</string>
+    <string name="coomi_assistant_save">保存手机助手配置</string>
+    <string name="coomi_assistant_choose_provider">请选择服务商</string>
+    <string name="coomi_assistant_choose_model">请选择转写模型</string>
+    <string name="coomi_assistant_need_speech">请选择可用的转写模型，或开启系统语音识别回退</string>
+    <string name="coomi_assistant_saved">手机助手配置已保存</string>
+    <string name="coomi_assistant_configured">已配置</string>
+    <string name="coomi_assistant_role_missing">请在系统设置中选择 Comax</string>
+    <string name="coomi_assistant_mic_missing">未授予录音权限</string>
+    <string name="coomi_assistant_accessibility_missing">未开启，无法控制屏幕</string>
+    <string name="coomi_assistant_overlay_missing">未允许悬浮显示</string>
+    <string name="coomi_assistant_autostart_missing">建议加入系统自启动白名单</string>
+    <string name="coomi_assistant_engine_ready">本地引擎已连接</string>
+    <string name="coomi_assistant_engine_missing">打开 Comax 后会自动启动</string>
+
     <!-- ===== WebView 闪屏 ===== -->
     <string name="coomi_splash_hint">正在连接本机引擎…</string>
     <string name="coomi_splash_retry">重试</string>
@@ -247,5 +280,5 @@
     <string name="coomi_user_agreement_title">用户协议</string>
     <string name="coomi_user_agreement_body">使用 Coomi 即表示您授权其按您的指令在本机执行操作。请审慎确认高风险操作并遵守适用法律。软件按现状提供，重要数据请自行备份。</string>
     <string name="coomi_privacy_policy_title">用户隐私政策</string>
-    <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求会发送给您配置的服务商。匿名日活仅按 IP 每日去重，不上传对话或文件；错误反馈仅在您确认后上传脱敏诊断。</string>
+    <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求与您主动使用的语音转写会发送给所配置的服务商。应用不再上报版本日活；错误反馈仅在您确认后上传脱敏诊断。</string>
 </resources>

@@ -1085,6 +1085,11 @@ fn apply_reasoning_effort(body: &mut Value, effort: Option<&str>, responses_api:
     let Some(effort) = effort.filter(|value| *value != "auto") else {
         return;
     };
+    if effort == "off" {
+        // "off"：移除所有推理字段，让模型关闭思考
+        remove_reasoning_fields(body);
+        return;
+    }
     if responses_api {
         body["reasoning"] = json!({"effort": effort});
     } else {

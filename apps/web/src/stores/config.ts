@@ -142,6 +142,7 @@ export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
 ]
 
 export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
+  { value: 'off', label: '关闭' },
   { value: 'auto', label: '自动' },
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },

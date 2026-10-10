@@ -196,6 +196,50 @@ pub fn remove_configured_mcp(home: &Path, name: &str) -> Result<()> {
     })
 }
 
+/// 添加或更新 MCP server 配置（原子写）。返回 true 表示新建，false 表示覆盖已有。
+pub fn upsert_mcp_config(
+    home: &Path,
+    name: &str,
+    config: &Value,
+) -> Result<bool> {
+    validate_name(name)?;
+    anyhow::ensure!(config.is_object(), "MCP config must be an object");
+    let transport = config
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("stdio");
+    anyhow::ensure!(matches!(transport, "stdio" | "http" | "sse"), "unsupported MCP transport");
+    if transport == "stdio" {
+        anyhow::ensure!(
+            config.get("command").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty()),
+            "stdio MCP command is required"
+        );
+    } else {
+        anyhow::ensure!(
+            config.get("url").and_then(Value::as_str).is_some_and(|value| value.starts_with("http://") || value.starts_with("https://")),
+            "remote MCP URL must use http or https"
+        );
+    }
+    let existed = std::cell::Cell::new(false);
+    update_mcp_document(home, |servers| {
+        existed.set(servers.contains_key(name));
+        servers.insert(name.to_owned(), config.clone());
+        Ok(())
+    })?;
+    Ok(!existed.get())
+}
+
+/// 返回指定 MCP server 的原始配置（未掩码）。
+pub fn get_mcp_config(home: &Path, name: &str) -> Result<Option<Value>> {
+    let path = home.join("config").join("mcp_servers.json");
+    let document = read_json_or_default(&path, json!({"version": 1, "servers": {}}))?;
+    let servers = document
+        .get("servers")
+        .and_then(Value::as_object)
+        .context("mcp_servers.json has no servers object")?;
+    Ok(servers.get(name).cloned())
+}
+
 fn update_mcp_document(
     home: &Path,
     update: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<()>,
@@ -213,6 +257,7 @@ fn update_mcp_document(
 fn validate_name(name: &str) -> Result<()> {
     anyhow::ensure!(
         !name.is_empty()
+            && name.chars().all(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
             && Path::new(name).components().count() == 1
             && !matches!(name, "." | ".."),
         "name must be one directory component"

@@ -32,6 +32,11 @@ const isLastUser = computed(() => isUser.value && session.lastUserMessage === pr
 /** 只有最新一条助手消息可回撤。 */
 const isLastAssistant = computed(() => isAssistant.value && session.lastAssistantMessage === props.msg)
 const streaming = computed(() => props.msg.kind === 'assistant' && props.msg.streaming)
+/** 该用户消息正处于编辑覆盖模式：给原气泡加高亮脉冲提示。 */
+const isBeingEdited = computed(() => isUser.value
+  && !!session.pendingEdit
+  && !!props.msg.mid
+  && session.pendingEdit.mid === props.msg.mid)
 const src = computed(() => props.msg.content)
 
 /** 编辑：把该消息文本回填到输入框，发送时覆盖该轮重新执行。 */
@@ -136,7 +141,7 @@ async function copyAll() {
 </script>
 
 <template>
-  <div v-if="isUser" class="row user" :class="{ 'morph-pending': (msg as UserMessage).morphing, 'morph-arrived': (msg as UserMessage).morphArrived }" :data-message-id="msg.id">
+  <div v-if="isUser" class="row user" :class="{ 'morph-pending': (msg as UserMessage).morphing, 'morph-arrived': (msg as UserMessage).morphArrived, 'being-edited': isBeingEdited }" :data-message-id="msg.id">
     <div class="wrap user-wrap">
       <div class="bubble cascade">{{ msg.content }}</div>
       <div v-if="(msg as UserMessage).attachments?.length" class="file-chips">
@@ -248,5 +253,16 @@ async function copyAll() {
   font-size: 12.5px; color: var(--text-3);
 }
 .act:active { background: var(--fill); color: var(--blue); }
+
+/* 编辑覆盖模式：原气泡高亮脉冲，提示这一轮将被改写 */
+.being-edited .bubble { animation: edit-pulse 1.2s ease-in-out infinite; }
+@keyframes edit-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(76,124,247,.0); }
+  50% { box-shadow: 0 0 0 4px rgba(76,124,247,.35); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .being-edited .bubble { animation: none; outline: 2px solid var(--blue-border); }
+}
+[data-all-animations-off="true"] .being-edited .bubble { animation: none; outline: 2px solid var(--blue-border); }
 </style>
 

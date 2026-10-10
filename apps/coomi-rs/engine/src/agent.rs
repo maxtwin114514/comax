@@ -429,7 +429,7 @@ impl Agent {
                 reasoning_effort: self.reasoning_effort.clone(),
                 session_id: Some(session.id.to_string()),
                 search_enabled: false,
-                thinking_enabled: true,
+                thinking_enabled: self.reasoning_effort.as_deref() != Some("off"),
             };
             let stream_observer = ObserverStream { observer };
             let mut retry_attempt = 0_u8;
@@ -721,8 +721,11 @@ impl Agent {
             .await
             .map_err(AgentError::Compaction)?;
 
-        let (messages, compact_usage) = if let Some(response) = remote {
-            (normalize_history(&response.messages), response.usage)
+        let (mut messages, compact_usage) = if let Some(response) = remote {
+            let mut messages = normalize_history(&response.messages);
+            let target = crate::compaction_target_tokens(&capabilities);
+            crate::trim_compacted_history(&self.system_prompt, &mut messages, &[], target);
+            (messages, response.usage)
         } else {
             let prompt_overhead = crate::estimate_request_tokens(
                 &self.system_prompt,
@@ -756,6 +759,13 @@ impl Agent {
                 response.usage,
             )
         };
+        // 本地路径同样收缩：摘要本身可能过长，且旧摘要必须只保留一条。
+        crate::trim_compacted_history(
+            &self.system_prompt,
+            &mut messages,
+            &[],
+            crate::compaction_target_tokens(&capabilities),
+        );
         session.messages = messages;
         session.context.reset_after_compaction(
             &self.system_prompt,

@@ -7,7 +7,9 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -20,29 +22,29 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.AnimationSet;
+import android.view.animation.ScaleAnimation;
+import android.view.animation.TranslateAnimation;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 控制模式的桌面悬浮层。
  *
- * <p>三件事：</p>
- * <ol>
- *   <li><b>输入框就在悬浮窗里</b>。控制模式的目标是操作别的 App，让用户为了打一句话
- *       先切回 Coomi 再切回去，是很别扭的。展开态会临时申请焦点（输入法才能弹出来），
- *       收起成小球时立刻放弃焦点，避免挡住目标 App 的输入。</li>
- *   <li><b>思考过程持续可见</b>。模型的推理片段与工具调用由
- *       {@link #pushTrace} 追加进滚动区，切到微信/QQ 之后也能看到它进度到哪了。</li>
- *   <li><b>常驻但很轻</b>。只占屏幕顶部一条，其余区域全部留给目标 App。</li>
- * </ol>
+ * <p>启动默认只显示一个蓝白悬浮球；点击后以 alpha+scale+translation 动画展开
+ * 任务输入卡，收起时反向播放动画。卡片顶部保留单行状态条，覆盖更新而非追加列表。
+ * 点击/长按前显示不拦截触摸的坐标反馈环，滑动时显示方向反馈轨迹且不来回切换窗口。
  *
  * <p>用前台服务承载：控制模式一次可能持续几分钟，普通后台服务会被系统回收。</p>
  */
@@ -58,46 +60,48 @@ public final class CoomiFloatService extends Service {
     public static final String EXTRA_TITLE = "title";
     public static final String EXTRA_BODY = "body";
 
-    /** 思考区最多保留多少行，避免长时间运行把内存堆满。 */
-    private static final int MAX_TRACE_LINES = 40;
+    private static final int ANIM_DURATION_MS = 220;
+    private static final int FEEDBACK_DURATION_MS = 450;
 
     private static volatile CoomiFloatService instance;
 
     private WindowManager windowManager;
-    private FrameLayout root;
-    private LinearLayout card;
-    private TextView titleView;
-    private TextView statusView;
-    private TextView ballView;
-    private ScrollView traceScroll;
-    private LinearLayout traceBox;
+    private ViewGroup root;              // full-screen overlay root
+    private LinearLayout card;           // input + actions
+    private TextView topStatus;          // single-line always-on-top status
+    private TextView ballView;           // collapsed ball
     private EditText input;
+    private FeedbackView feedback;
     private WindowManager.LayoutParams params;
 
-    private boolean collapsed = false;
+    private boolean collapsed = true;    // start collapsed
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final StringBuilder traceBuffer = new StringBuilder();
 
     private int lastX = -1;
     private int lastY = -1;
     private static volatile String controlSessionId = "", controlProviderId = "", controlModel = "";
+
     public static void setSession(String id, String provider, String model) {
         controlSessionId = id == null ? "" : id;
         controlProviderId = provider == null ? "" : provider;
         controlModel = model == null ? "" : model;
     }
+
+    public static CoomiFloatService getInstance() {
+        return instance;
+    }
+
+    private final AtomicBoolean releaseInProgress = new AtomicBoolean(false);
     public static void releaseForAutomation() {
         CoomiFloatService service = instance;
         if (service == null) return;
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-        Runnable release = () -> { service.setCollapsedInternal(true); latch.countDown(); };
-        if (Looper.myLooper() == Looper.getMainLooper()) release.run();
-        else {
-            service.handler.post(release);
-            try { latch.await(800, java.util.concurrent.TimeUnit.MILLISECONDS); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
+        if (!service.releaseInProgress.compareAndSet(false, true)) return;
+        service.handler.post(() -> {
+            service.setCollapsedInternal(true);
+            service.releaseInProgress.set(false);
+        });
     }
+
     private int touchStartX;
     private int touchStartY;
     private float touchDownRawX;
@@ -164,7 +168,7 @@ public final class CoomiFloatService extends Service {
         if (ACTION_TRACE.equals(action)) {
             final String title = intent.getStringExtra(EXTRA_TITLE);
             final String body = intent.getStringExtra(EXTRA_BODY);
-            handler.post(() -> appendTrace(title, body));
+            handler.post(() -> updateStatusLine(title, body));
             return START_STICKY;
         }
         if (ACTION_COLLAPSE.equals(action)) {
@@ -174,7 +178,6 @@ public final class CoomiFloatService extends Service {
         }
         handler.post(() -> {
             if (root != null && root.getParent() == null) attach();
-            setCollapsedInternal(collapsed);
         });
         return START_STICKY;
     }
@@ -194,7 +197,6 @@ public final class CoomiFloatService extends Service {
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager != null) {
                 NotificationChannel channel = new NotificationChannel(
-                    // app.coomi 包要写全 R 的包名：短名 R 只在 com.termux 命名空间下可见
                     CHANNEL_ID, getString(com.termux.R.string.coomi_float_channel_name),
                     NotificationManager.IMPORTANCE_MIN);
                 channel.setShowBadge(false);
@@ -235,21 +237,40 @@ public final class CoomiFloatService extends Service {
     private void buildOverlay() {
         if (root != null) return;
         root = new FrameLayout(this);
+        root.setLayoutParams(new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.setBackgroundColor(Color.TRANSPARENT);
 
+        // ── 顶部单行状态 ──
+        topStatus = new TextView(this);
+        topStatus.setTextColor(0xFFFFFFFF);
+        topStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        topStatus.setSingleLine(true);
+        topStatus.setEllipsize(TextUtils.TruncateAt.END);
+        topStatus.setPadding(dp(12), dp(6), dp(12), dp(6));
+        topStatus.setBackgroundColor(0xCC2F6BD8);
+        FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        statusLp.gravity = Gravity.TOP;
+        root.addView(topStatus, statusLp);
+
+        // ── 展开卡片：输入 + 快捷操作 ──
         card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(12), dp(9), dp(12), dp(10));
-        card.setBackground(rounded(0xF21A1D24, 16, 0x33FFFFFF));
+        card.setBackground(rounded(0xFFFBFCFE, 16, 0x22000000));
         card.setElevation(dp(8));
+        card.setVisibility(View.GONE);
+        card.setAlpha(0f);
 
-        // ── 顶栏：状态 + 收起 ──
+        // ── 顶栏：标题 + 收起 ──
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView dotView = new TextView(this);
         dotView.setText("●");
-        dotView.setTextColor(0xFF4C7CF7);
+        dotView.setTextColor(0xFF2F6BD8);
         dotView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f);
         header.addView(dotView);
 
@@ -260,48 +281,26 @@ public final class CoomiFloatService extends Service {
         titleBoxParams.leftMargin = dp(6);
         titleBox.setLayoutParams(titleBoxParams);
 
-        titleView = new TextView(this);
+        TextView titleView = new TextView(this);
         titleView.setText("控制模式");
-        titleView.setTextColor(0xFFF2F4F8);
+        titleView.setTextColor(0xFF1A1D24);
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         titleBox.addView(titleView);
 
-        statusView = new TextView(this);
-        statusView.setText("就绪");
-        statusView.setTextColor(0xFF8FA3C8);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
-        statusView.setSingleLine(true);
-        statusView.setEllipsize(TextUtils.TruncateAt.END);
-        titleBox.addView(statusView);
-
         header.addView(titleBox);
 
         TextView collapse = new TextView(this);
         collapse.setText("收起");
-        collapse.setTextColor(0xFF7FA8FF);
+        collapse.setTextColor(0xFF2F6BD8);
         collapse.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         collapse.setPadding(dp(10), dp(4), 0, dp(4));
         collapse.setOnClickListener(v -> setCollapsedInternal(true));
         header.addView(collapse);
         card.addView(header);
 
-        // ── 思考过程：滚动区，持续追加 ──
-        traceScroll = new ScrollView(this);
-        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(84));
-        scrollParams.topMargin = dp(7);
-        traceScroll.setLayoutParams(scrollParams);
-        traceScroll.setBackground(rounded(0x33FFFFFF, 10, 0));
-        traceScroll.setPadding(dp(8), dp(7), dp(8), dp(7));
-
-        traceBox = new LinearLayout(this);
-        traceBox.setOrientation(LinearLayout.VERTICAL);
-        traceScroll.addView(traceBox);
-        card.addView(traceScroll);
-
-        // ── 输入框：就在悬浮窗里，不用切回应用 ──
+        // ── 输入框 ──
         LinearLayout inputRow = new LinearLayout(this);
         inputRow.setOrientation(LinearLayout.HORIZONTAL);
         inputRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -315,11 +314,11 @@ public final class CoomiFloatService extends Service {
         input.setFocusableInTouchMode(true);
         input.setOnClickListener(v -> showKeyboard(input));
         input.setHintTextColor(0xFF6E7A90);
-        input.setTextColor(0xFFF2F4F8);
+        input.setTextColor(0xFF1A1D24);
         input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         input.setSingleLine(true);
         input.setImeOptions(EditorInfo.IME_ACTION_SEND);
-        input.setBackground(rounded(0xFF252A34, 10, 0x33FFFFFF));
+        input.setBackground(rounded(0xFFFFFFFF, 10, 0x33000000));
         input.setPadding(dp(10), dp(7), dp(10), dp(7));
         LinearLayout.LayoutParams inputParams =
             new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -349,7 +348,7 @@ public final class CoomiFloatService extends Service {
         inputRow.addView(send);
         card.addView(inputRow);
 
-        // ── 快捷操作：切到别的 App 后仍能一键返回/回桌面 ──
+        // ── 快捷操作 ──
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
@@ -362,18 +361,24 @@ public final class CoomiFloatService extends Service {
         actions.addView(quickAction("只填入", this::fillOnly));
         card.addView(actions);
 
-        root.addView(card);
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        cardLp.gravity = Gravity.TOP | Gravity.START;
+        root.addView(card, cardLp);
 
+        // ── 悬浮球 ──
         ballView = new TextView(this);
         ballView.setText("控");
         ballView.setGravity(Gravity.CENTER);
         ballView.setTextColor(Color.WHITE);
         ballView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-        ballView.setBackground(rounded(0xF21A1D24, 24, 0x44FFFFFF));
+        ballView.setBackground(rounded(0xFF2F6BD8, 24, 0xFFFFFFFF));
         ballView.setElevation(dp(8));
-        ballView.setLayoutParams(new FrameLayout.LayoutParams(dp(46), dp(46)));
+        ballView.setVisibility(View.VISIBLE);
         ballView.setOnClickListener(v -> setCollapsedInternal(false));
-        root.addView(ballView);
+        FrameLayout.LayoutParams ballLp = new FrameLayout.LayoutParams(dp(46), dp(46));
+        ballLp.gravity = Gravity.TOP | Gravity.START;
+        root.addView(ballView, ballLp);
 
         ballView.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
@@ -405,7 +410,6 @@ public final class CoomiFloatService extends Service {
             }
         });
 
-        // 拖动整张卡片：展开态也要能挪开，不然会盖住目标 App 的标题栏。
         header.setOnTouchListener(new View.OnTouchListener() {
             @Override
             public boolean onTouch(View v, MotionEvent event) {
@@ -435,23 +439,112 @@ public final class CoomiFloatService extends Service {
             }
         });
 
+        updateTopStatus("就绪");
         attach();
-        setCollapsedInternal(collapsed);
-        appendTrace("控制模式已启动", "悬浮窗可以拖动；点击「收起」变成小球。");
+        applyCollapsedState(false);
     }
 
     private TextView quickAction(String label, Runnable action) {
         TextView view = new TextView(this);
         view.setText(label);
-        view.setTextColor(0xFFAFC4E8);
+        view.setTextColor(0xFF2F6BD8);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         view.setGravity(Gravity.CENTER);
-        view.setBackground(rounded(0x2EFFFFFF, 9, 0));
+        view.setBackground(rounded(0x222F6BD8, 9, 0));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(32), 1f);
         params.rightMargin = dp(6);
         view.setLayoutParams(params);
         view.setOnClickListener(v -> action.run());
         return view;
+    }
+
+    // ── 反馈层（不拦截触摸） ─────────────────────────────────────────
+
+    private void showTapFeedback(float x, float y) {
+        if (feedback == null) {
+            feedback = new FeedbackView(this);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+            root.addView(feedback, lp);
+        }
+        feedback.showTap(x, y);
+        invalidateScreenCache();
+    }
+
+    private void showSwipeFeedback(float x1, float y1, float x2, float y2) {
+        if (feedback == null) {
+            feedback = new FeedbackView(this);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+            root.addView(feedback, lp);
+        }
+        feedback.showSwipe(x1, y1, x2, y2);
+    }
+
+    private void invalidateScreenCache() {
+        CoomiAccessibilityService svc = CoomiAccessibilityService.get();
+        if (svc != null) svc.invalidateScreenCache();
+    }
+
+    private final class FeedbackView extends View {
+        private float fx, fy, fx2, fy2;
+        private boolean isSwipe = false;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private android.animation.ValueAnimator anim;
+
+        FeedbackView(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            setClickable(false);
+            setFocusable(false);
+        }
+
+        void showTap(float x, float y) {
+            isSwipe = false;
+            fx = x; fy = y;
+            setVisibility(VISIBLE);
+            if (anim != null) anim.cancel();
+            anim = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            anim.setDuration(FEEDBACK_DURATION_MS);
+            anim.addUpdateListener(a -> invalidate());
+            anim.addListener(new android.animation.AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(android.animation.Animator a) { setVisibility(GONE); }
+            });
+            anim.start();
+        }
+
+        void showSwipe(float x1, float y1, float x2, float y2) {
+            isSwipe = true;
+            fx = x1; fy = y1; fx2 = x2; fy2 = y2;
+            setVisibility(VISIBLE);
+            if (anim != null) anim.cancel();
+            anim = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            anim.setDuration(FEEDBACK_DURATION_MS);
+            anim.addUpdateListener(a -> invalidate());
+            anim.addListener(new android.animation.AnimatorListenerAdapter() {
+                @Override public void onAnimationEnd(android.animation.Animator a) { setVisibility(GONE); }
+            });
+            anim.start();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            if (anim == null) return;
+            float p = (float) anim.getAnimatedValue();
+            if (Float.isNaN(p)) return;
+            if (isSwipe) {
+                paint.setColor(Color.argb((int) (180 * (1f - p)), 0x2F, 0x6B, 0xD8));
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(3) * p);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                canvas.drawLine(fx, fy, fx + (fx2 - fx) * p, fy + (fy2 - fy) * p, paint);
+            } else {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2));
+                paint.setColor(Color.argb((int) (180 * (1f - p)), 0x2F, 0x6B, 0xD8));
+                float r = dp(8) + dp(20) * p;
+                canvas.drawCircle(fx, fy, r, paint);
+            }
+        }
     }
 
     // ── 输入与操作 ────────────────────────────────────────────────────
@@ -460,12 +553,12 @@ public final class CoomiFloatService extends Service {
         if (input == null) return;
         String text = input.getText() == null ? "" : input.getText().toString().trim();
         if (text.isEmpty()) {
-            appendTrace(null, "输入为空，先写点内容");
+            updateTopStatus("输入为空，先写点内容");
             return;
         }
         CoomiService service = CoomiService.current();
         if (service == null || controlSessionId.isEmpty()) {
-            appendTrace(null, "引擎或控制会话未就绪，请先在应用里开启控制模式");
+            updateTopStatus("引擎或控制会话未就绪，请先在应用里开启控制模式");
             return;
         }
         setCollapsedInternal(true);
@@ -473,8 +566,8 @@ public final class CoomiFloatService extends Service {
         new Thread(() -> {
             String error = service.submitControlTask(session, provider, model, text);
             handler.post(() -> {
-                if (error == null) { input.setText(""); appendTrace("任务已提交", text); }
-                else { appendTrace("任务未提交", error); toast(error); }
+                if (error == null) { input.setText(""); updateTopStatus("任务已提交: " + text); }
+                else { updateTopStatus("任务未提交: " + error); toast(error); }
             });
         }, "coomi-control-submit").start();
     }
@@ -483,51 +576,50 @@ public final class CoomiFloatService extends Service {
         if (input == null) return;
         String text = input.getText() == null ? "" : input.getText().toString().trim();
         if (text.isEmpty()) {
-            appendTrace(null, "输入为空，先写点内容");
+            updateTopStatus("输入为空");
             return;
         }
         input.setText("");
         if (!CoomiAccessibilityService.isReady()) {
-            appendTrace(null, "无障碍未开启，无法操作屏幕");
+            updateTopStatus("无障碍未开启");
             return;
         }
         setCollapsedInternal(true);
         boolean ok = CoomiAccessibilityService.get().inputText(text);
-        appendTrace(null, ok ? "已填入输入框（未发送）" : "没找到可输入的输入框");
+        updateTopStatus(ok ? "已填入输入框（未发送）" : "没找到可输入的输入框");
     }
 
     private void fillAndSend(String text) {
         if (!CoomiAccessibilityService.isReady()) {
-            appendTrace(null, "无障碍未开启，无法操作屏幕。请回到应用点「开启无障碍」。");
+            updateTopStatus("无障碍未开启");
             toast("无障碍未开启");
             return;
         }
         CoomiAccessibilityService service = CoomiAccessibilityService.get();
         boolean filled = service.inputText(text);
         if (!filled && !service.tapFirstEditor()) {
-            appendTrace(null, "没找到输入框。请先手动点一下聊天输入框再发送。");
+            updateTopStatus("没找到输入框");
             toast("没找到输入框");
             return;
         }
         if (filled) {
-            // 部分输入框 SET_TEXT 之后需要一小段时间让发送按钮变可用。
             handler.postDelayed(() -> {
                 boolean sent = service.send();
-                appendTrace(null, sent ? "已发送" : "已填入，但没找到发送按钮");
+                updateTopStatus(sent ? "已发送" : "已填入，但没找到发送按钮");
                 if (!sent) toast("没找到发送按钮");
             }, 220);
         } else {
-            appendTrace(null, "已聚焦输入框，请在目标应用里手动输入");
+            updateTopStatus("已聚焦输入框");
         }
     }
 
     private void runGlobal(String action) {
         if (!CoomiAccessibilityService.isReady()) {
-            appendTrace(null, "无障碍未开启，无法执行「" + action + "」");
+            updateTopStatus("无障碍未开启，无法执行 " + action);
             return;
         }
         boolean ok = CoomiAccessibilityService.get().globalAction(action);
-        appendTrace(null, ok ? "已执行：" + action : "执行失败：" + action);
+        updateTopStatus(ok ? "已执行：" + action : "执行失败：" + action);
     }
 
     private void toast(String message) {
@@ -543,11 +635,11 @@ public final class CoomiFloatService extends Service {
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
             params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
                 type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
             params.gravity = Gravity.TOP | Gravity.START;
             params.x = lastX >= 0 ? lastX : dp(10);
@@ -587,12 +679,14 @@ public final class CoomiFloatService extends Service {
      * 这正是「悬浮窗里打不了字」的原因。收起成小球后立刻加回该标志，把焦点还给目标 App。</p>
      */
     private void setCollapsedInternal(boolean value) {
+        if (collapsed == value) return;
         collapsed = value;
         if (card == null || ballView == null) return;
+        applyCollapsedState(true);
+    }
 
-        card.setVisibility(value ? View.GONE : View.VISIBLE);
-        ballView.setVisibility(value ? View.VISIBLE : View.GONE);
-
+    private void applyCollapsedState(boolean animate) {
+        boolean value = collapsed;
         if (params != null) {
             if (value) {
                 params.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
@@ -607,25 +701,96 @@ public final class CoomiFloatService extends Service {
                 params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE;
             }
-            // 展开态固定宽度：太宽会盖住目标 App 的内容，太窄输入框没法用。
-            params.width = value
-                ? WindowManager.LayoutParams.WRAP_CONTENT
-                : Math.min(dp(300), getResources().getDisplayMetrics().widthPixels - dp(28));
             updateParams();
         }
-        if (!value && input != null) {
-            input.setVisibility(View.VISIBLE);
-            // 展开时主动把焦点交给输入框并唤起输入法：
-            // 悬浮球本身不是输入框，光去掉 NOT_FOCUSABLE 并不会自动弹输入法。
-            input.requestFocus();
-            handler.postDelayed(() -> showKeyboard(input), 120);
-            // 部分 ROM 在悬浮窗刚变焦时输入法抢焦点失败，延迟再试一次。
-            handler.postDelayed(() -> {
-                if (!collapsed && input != null && input.isFocused()) {
-                    showKeyboard(input);
-                }
-            }, 420);
+
+        if (!animate) {
+            card.setVisibility(value ? View.GONE : View.VISIBLE);
+            card.setAlpha(value ? 0f : 1f);
+            card.setScaleX(value ? 0.7f : 1f);
+            card.setScaleY(value ? 0.7f : 1f);
+            ballView.setVisibility(value ? View.VISIBLE : View.GONE);
+            ballView.setAlpha(value ? 1f : 0f);
+            ballView.setScaleX(value ? 1f : 0.1f);
+            ballView.setScaleY(value ? 1f : 0.1f);
+            if (!value) focusInput();
+            return;
         }
+
+        if (!value) {
+            // 展开动画：卡片从 0.7 缩放到 1、淡入；球缩小淡出
+            card.setVisibility(View.VISIBLE);
+            card.setAlpha(0f);
+            card.setScaleX(0.7f);
+            card.setScaleY(0.7f);
+            ballView.setVisibility(View.VISIBLE);
+            ballView.setAlpha(1f);
+            ballView.setScaleX(1f);
+            ballView.setScaleY(1f);
+
+            AnimationSet cardAnim = new AnimationSet(true);
+            cardAnim.setDuration(ANIM_DURATION_MS);
+            cardAnim.addAnimation(new AlphaAnimation(0f, 1f));
+            cardAnim.addAnimation(new ScaleAnimation(0.7f, 1f, 0.7f, 1f,
+                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
+            cardAnim.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
+                @Override public void onAnimationStart(android.view.animation.Animation a) {}
+                @Override public void onAnimationRepeat(android.view.animation.Animation a) {}
+                @Override public void onAnimationEnd(android.view.animation.Animation a) {
+                    ballView.setVisibility(View.GONE);
+                    focusInput();
+                }
+            });
+            card.startAnimation(cardAnim);
+
+            AnimationSet ballAnim = new AnimationSet(true);
+            ballAnim.setDuration(ANIM_DURATION_MS);
+            ballAnim.addAnimation(new AlphaAnimation(1f, 0f));
+            ballAnim.addAnimation(new ScaleAnimation(1f, 0.1f, 1f, 0.1f,
+                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
+            ballView.startAnimation(ballAnim);
+        } else {
+            // 收起动画：卡片缩小淡出；球放大淡入
+            card.setVisibility(View.VISIBLE);
+            card.setAlpha(1f);
+            card.setScaleX(1f);
+            card.setScaleY(1f);
+            ballView.setVisibility(View.VISIBLE);
+            ballView.setAlpha(0f);
+            ballView.setScaleX(0.1f);
+            ballView.setScaleY(0.1f);
+
+            AnimationSet cardAnim = new AnimationSet(true);
+            cardAnim.setDuration(ANIM_DURATION_MS);
+            cardAnim.addAnimation(new AlphaAnimation(1f, 0f));
+            cardAnim.addAnimation(new ScaleAnimation(1f, 0.7f, 1f, 0.7f,
+                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
+            cardAnim.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
+                @Override public void onAnimationStart(android.view.animation.Animation a) {}
+                @Override public void onAnimationRepeat(android.view.animation.Animation a) {}
+                @Override public void onAnimationEnd(android.view.animation.Animation a) {
+                    card.setVisibility(View.GONE);
+                }
+            });
+            card.startAnimation(cardAnim);
+
+            AnimationSet ballAnim = new AnimationSet(true);
+            ballAnim.setDuration(ANIM_DURATION_MS);
+            ballAnim.addAnimation(new AlphaAnimation(0f, 1f));
+            ballAnim.addAnimation(new ScaleAnimation(0.1f, 1f, 0.1f, 1f,
+                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
+            ballView.startAnimation(ballAnim);
+        }
+    }
+
+    private void focusInput() {
+        if (input == null) return;
+        input.setVisibility(View.VISIBLE);
+        input.requestFocus();
+        handler.postDelayed(() -> showKeyboard(input), 120);
+        handler.postDelayed(() -> {
+            if (!collapsed && input != null && input.isFocused()) showKeyboard(input);
+        }, 420);
     }
 
     private void hideKeyboard() {
@@ -654,33 +819,24 @@ public final class CoomiFloatService extends Service {
         }
     }
 
-    // ── 思考过程 ──────────────────────────────────────────────────────
+    // ── 顶部状态（单行覆盖） ─────────────────────────────────────────
 
-    private void appendTrace(String title, String body) {
-        if (traceBox == null) return;
-
-        // 顶栏状态：只取一句，保持醒目不刷屏
-        if (title != null && !title.isEmpty() && statusView != null) {
-            statusView.setText(title);
-            if (titleView != null && titleView.getText().length() == 0) titleView.setText("控制模式");
+    private void updateTopStatus(String text) {
+        if (topStatus != null) {
+            topStatus.setText(text);
         }
+    }
 
+    private void updateStatusLine(String title, String body) {
         String line = body != null && !body.isEmpty()
             ? (title != null && !title.isEmpty() ? title + "：" + body : body)
-            : title;
+            : (title != null ? title : "");
         if (TextUtils.isEmpty(line)) return;
-
-        TextView row = new TextView(this);
-        row.setText("· " + line);
-        row.setTextColor(0xFFC2CDE0);
-        row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-        row.setLineSpacing(dp(1), 1f);
-        traceBox.addView(row);
-
-        // 只保留最近若干条，长时间运行不会把内存堆满
-        while (traceBox.getChildCount() > MAX_TRACE_LINES) {
-            traceBox.removeViewAt(0);
-        }
-        traceScroll.post(() -> traceScroll.fullScroll(View.FOCUS_DOWN));
+        updateTopStatus(line);
     }
+
+    // ── 反馈触发（从 AccessibilityService 调用） ──────────────────────
+
+    public void showTapAt(float x, float y) { showTapFeedback(x, y); }
+    public void showSwipeFrom(float x1, float y1, float x2, float y2) { showSwipeFeedback(x1, y1, x2, y2); }
 }

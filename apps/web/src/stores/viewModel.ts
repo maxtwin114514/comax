@@ -67,3 +67,6 @@ export interface LoopProgress {
   active: boolean; currentStep: number; totalSteps: number
   status: string; currentDescription?: string
 }
+
+export interface PlanStep { step: string; status: 'pending' | 'in_progress' | 'completed'; explanation?: string }
+export interface PlanProgress { active: boolean; steps: PlanStep[]; explanation?: string }

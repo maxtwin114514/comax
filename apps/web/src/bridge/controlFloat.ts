@@ -53,6 +53,22 @@ export function pushTrace(title: string, body = ''): void {
   } catch { /* 悬浮层不可用时静默忽略 */ }
 }
 
+let latestLine = ''
+let lineTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Coalesce token-rate reasoning updates into one native status line. */
+export function setControlLine(text: string): void {
+  if (!enabled) return
+  latestLine = text
+  if (lineTimer) return
+  lineTimer = setTimeout(() => {
+    lineTimer = null
+    const value = latestLine
+    latestLine = ''
+    try { bridge()?.pushControlStatus?.(clip(value)) } catch { /* overlay unavailable */ }
+  }, 120)
+}
+
 /** 只刷新悬浮层顶部状态行，不往思考区堆内容。 */
 export function pushStatus(status: string): void {
   if (!enabled) return

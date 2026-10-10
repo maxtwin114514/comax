@@ -8,6 +8,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::Multipart;
 use axum::extract::Path as AxumPath;
 use axum::extract::Query;
 use axum::extract::State;
@@ -62,6 +63,7 @@ use coomi_services::MemoryType;
 use coomi_services::{ChatMember, GroupChatStore, GroupMessage, GroupRoom, MemberActivity};
 use coomi_services::{CollabArtifact, CollabRole, CollabStore, CollabTask};
 use coomi_services::ProviderDocument;
+use coomi_services::ProviderKind;
 use coomi_services::ProviderProtocol;
 use coomi_services::ProviderRegistry;
 use coomi_services::ProviderSettings;
@@ -151,6 +153,7 @@ struct AppState {
     /// keeping Android memory use bounded.
     task_slots: Arc<Semaphore>,
     task_manager: Arc<TaskManager>,
+    mcp_runtime: Arc<McpRuntime>,
     /// 图片发送已降级的会话：请求因图片被上游拒绝后置位，
     /// 该会话后续请求不再重放历史图片，避免「一张图报错→整会话报废」。
     vision_degraded: Arc<StdMutex<HashSet<String>>>,
@@ -764,6 +767,7 @@ pub async fn serve(
     let restored_tasks = load_task_checkpoints(&home, &task_manager);
     let configured_task_limit = configured_connection_settings(&home).max_concurrent_tasks;
     let workflow_scheduler = crate::workflow::WorkflowScheduler::new(&home.clone());
+    let mcp_runtime = Arc::new(McpRuntime::load(&home).await);
     let state = AppState {
         home,
         cwd,
@@ -773,6 +777,7 @@ pub async fn serve(
         tasks: Arc::new(StdMutex::new(restored_tasks)),
         task_slots: Arc::new(Semaphore::new(configured_task_limit)),
         task_manager,
+        mcp_runtime,
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         registry_cache: Arc::new(StdMutex::new(registry_cache)),
         workflow_scheduler,
@@ -892,6 +897,12 @@ pub async fn serve(
         .route("/api/catalog/skills/install", post(install_skill_catalog))
         .route("/api/catalog/skills/import-zip", post(import_skill_zip))
         .route("/api/catalog/mcp/custom", post(import_mcp_custom))
+        .route("/api/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
+        .route("/api/mcp/servers/{id}", get(get_mcp_server).put(update_mcp_server).delete(delete_mcp_server))
+        .route("/api/mcp/servers/{id}/test", post(test_mcp_server))
+        .route("/api/model-capabilities", get(model_capabilities))
+        .route("/api/assistant/transcribe", post(assistant_transcribe).layer(DefaultBodyLimit::max(16 * 1024 * 1024)))
+        .route("/api/sessions/{id}/snapshot", get(session_snapshot))
         .route(
             "/api/catalog/skills/install-remote",
             post(install_skill_remote),
@@ -1150,7 +1161,7 @@ fn configured_reasoning_effort(home: &Path) -> String {
     read_settings(home)
         .get("reasoning_effort")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "auto" | "low" | "medium" | "high" | "xhigh"))
+        .filter(|value| matches!(*value, "off" | "auto" | "low" | "medium" | "high" | "xhigh"))
         .unwrap_or("auto")
         .to_owned()
 }
@@ -2904,6 +2915,268 @@ async fn get_session(    State(state): State<AppState>,
         .load(session_id)
         .map_err(|error| ApiError::internal(format!("failed to load session {id}: {error:#}")))?;
     Ok(Json(json!(session)))
+}
+
+/// One-shot authoritative state used when the WebView returns from Android background.
+async fn session_snapshot(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let session = SessionStore::new(&state.home)
+        .load(session_id)
+        .map_err(|error| ApiError::not_found(format!("failed to load session {id}: {error:#}")))?;
+    let running = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&id)
+        .is_some_and(|task| task.running.load(Ordering::SeqCst));
+    Ok(Json(json!({
+        "session": session,
+        "running": running,
+        "phase": state.tasks.lock().unwrap_or_else(|p| p.into_inner()).get(&id)
+            .map(|task| task.phase.lock().unwrap_or_else(|p| p.into_inner()).clone())
+            .unwrap_or_else(|| "idle".into()),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ModelCapabilitiesQuery {
+    provider_id: String,
+    model: String,
+}
+
+async fn model_capabilities(
+    State(state): State<AppState>,
+    Query(query): Query<ModelCapabilitiesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let selector = format!("{}:{}", query.provider_id.trim(), query.model.trim());
+    let provider = ProviderRegistry::load(&providers_path(&state.home))
+        .map_err(ApiError::from)?
+        .resolve(Some(&selector))
+        .map_err(|error| ApiError::bad_request(format!("unknown model: {error:#}")))?;
+    let model = provider.model.to_ascii_lowercase();
+    let parameters = provider.model_parameters.get(&provider.model);
+    let has_explicit_field = parameters
+        .and_then(|value| value.get("reasoningField"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let mut efforts = Vec::new();
+    if let Some(mapping) = parameters
+        .and_then(|value| value.get("reasoningMapping"))
+        .and_then(Value::as_object)
+    {
+        for effort in ["low", "medium", "high", "xhigh"] {
+            if mapping.get(effort).is_some() { efforts.push(effort); }
+        }
+    }
+    let source = if !efforts.is_empty() || has_explicit_field {
+        "provider-config"
+    } else if model.contains("gpt-5") || model.starts_with('o') {
+        efforts = vec!["low", "medium", "high", "xhigh"];
+        "model-name"
+    } else if model.contains("reason") || model.contains("thinking")
+        || model.contains("deepseek-r1") || provider.kind == ProviderKind::DeepseekAccount
+    {
+        efforts = vec!["low", "medium", "high"];
+        "model-name"
+    } else {
+        "unknown"
+    };
+    let can_disable = provider.kind != ProviderKind::DeepseekAccount
+        || !model.contains("reasoner");
+    Ok(Json(json!({
+        "reasoning": {
+            "supported": !efforts.is_empty() || has_explicit_field,
+            "efforts": efforts,
+            "source": source,
+            "can_disable": can_disable,
+        }
+    })))
+}
+
+async fn assistant_transcribe(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    let mut provider_id = String::new();
+    let mut model = String::new();
+    let mut language = None;
+    let mut filename = "speech.wav".to_string();
+    let mut content_type = "audio/wav".to_string();
+    let mut audio = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("invalid multipart form: {error}")))?
+    {
+        let name = field.name().unwrap_or_default().to_owned();
+        match name.as_str() {
+            "provider_id" => provider_id = field.text().await.map_err(|_| ApiError::bad_request("invalid provider_id"))?,
+            "model" => model = field.text().await.map_err(|_| ApiError::bad_request("invalid model"))?,
+            "language" => language = Some(field.text().await.map_err(|_| ApiError::bad_request("invalid language"))?),
+            "file" => {
+                if let Some(value) = field.file_name() { filename = value.to_owned(); }
+                if let Some(value) = field.content_type() { content_type = value.to_owned(); }
+                let bytes = field.bytes().await.map_err(|_| ApiError::bad_request("invalid audio file"))?;
+                if bytes.len() > crate::assistant::MAX_TRANSCRIPTION_BYTES {
+                    return Err(ApiError::bad_request("audio file exceeds 16 MiB"));
+                }
+                audio = Some(bytes.to_vec());
+            }
+            _ => {}
+        }
+    }
+    let selector = format!("{}:{}", provider_id.trim(), model.trim());
+    let provider = ProviderRegistry::load(&providers_path(&state.home))
+        .map_err(ApiError::from)?
+        .resolve(Some(&selector))
+        .map_err(|error| ApiError::bad_request(format!("unknown transcription model: {error:#}")))?;
+    let text = crate::assistant::transcribe(
+        &provider,
+        &model,
+        language.as_deref(),
+        &filename,
+        &content_type,
+        audio.ok_or_else(|| ApiError::bad_request("audio file is required"))?,
+    )
+    .await
+    .map_err(|error| ApiError::bad_gateway(format!("语音识别失败：{error:#}")))?;
+    Ok(Json(json!({"text": text})))
+}
+
+#[derive(Deserialize)]
+struct McpServerRequest {
+    name: String,
+    #[serde(default)]
+    config: Value,
+}
+
+#[derive(Deserialize)]
+struct McpTestRequest {
+    #[serde(default = "default_mcp_test_name")]
+    name: String,
+    config: Value,
+}
+
+fn default_mcp_test_name() -> String { "test".into() }
+
+fn redact_mcp_config(mut config: Value) -> Value {
+    for key in ["env", "headers"] {
+        if let Some(values) = config.get_mut(key).and_then(Value::as_object_mut) {
+            for value in values.values_mut() {
+                if value.as_str().is_some_and(|text| !text.is_empty()) {
+                    *value = Value::String("••••••".into());
+                }
+            }
+        }
+    }
+    config
+}
+
+fn merge_masked_mcp_secrets(next: &mut Value, previous: Option<&Value>) {
+    for key in ["env", "headers"] {
+        let old = previous.and_then(|value| value.get(key)).and_then(Value::as_object);
+        if let Some(values) = next.get_mut(key).and_then(Value::as_object_mut) {
+            for (name, value) in values.iter_mut() {
+                if value.as_str().is_some_and(|text| text.chars().all(|ch| matches!(ch, '•' | '*'))) {
+                    if let Some(original) = old.and_then(|items| items.get(name)) {
+                        *value = original.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn list_mcp_servers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut items = Vec::new();
+    for server in coomi_services::list_configured_mcp(&state.home).map_err(ApiError::from)? {
+        let raw = coomi_services::get_mcp_config(&state.home, &server.name)
+            .map_err(ApiError::from)?.unwrap_or_else(|| json!({}));
+        items.push(json!({
+            "name": server.name,
+            "transport": server.transport,
+            "enabled": server.enabled,
+            "target": server.target,
+            "config": redact_mcp_config(raw),
+        }));
+    }
+    Ok(Json(json!({"servers": items, "statuses": state.mcp_runtime.statuses()})))
+}
+
+async fn get_mcp_server(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let config = coomi_services::get_mcp_config(&state.home, &id)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| ApiError::not_found("MCP server is not configured"))?;
+    Ok(Json(json!({"name": id, "config": redact_mcp_config(config)})))
+}
+
+async fn create_mcp_server(
+    State(state): State<AppState>,
+    Json(request): Json<McpServerRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if coomi_services::get_mcp_config(&state.home, request.name.trim()).map_err(ApiError::from)?.is_some() {
+        return Err(ApiError::conflict("MCP server name already exists"));
+    }
+    save_mcp_server(&state, request.name, request.config).await
+}
+
+async fn update_mcp_server(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut request): Json<McpServerRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if request.name.trim().is_empty() { request.name = id.clone(); }
+    if request.name != id { return Err(ApiError::bad_request("renaming MCP servers is not supported")); }
+    save_mcp_server(&state, request.name, request.config).await
+}
+
+async fn save_mcp_server(
+    state: &AppState,
+    name: String,
+    mut config: Value,
+) -> Result<Json<Value>, ApiError> {
+    let previous = coomi_services::get_mcp_config(&state.home, name.trim()).map_err(ApiError::from)?;
+    merge_masked_mcp_secrets(&mut config, previous.as_ref());
+    coomi_services::upsert_mcp_config(&state.home, name.trim(), &config).map_err(ApiError::from)?;
+    state.mcp_runtime.reload(&state.home).await;
+    Ok(Json(json!({"ok": true, "name": name.trim(), "config": redact_mcp_config(config)})))
+}
+
+async fn delete_mcp_server(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    coomi_services::remove_configured_mcp(&state.home, &id).map_err(ApiError::from)?;
+    state.mcp_runtime.reload(&state.home).await;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn test_mcp_server(
+    State(state): State<AppState>,
+    AxumPath(_id): AxumPath<String>,
+    Json(mut request): Json<McpTestRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let previous = coomi_services::get_mcp_config(&state.home, request.name.trim()).map_err(ApiError::from)?;
+    merge_masked_mcp_secrets(&mut request.config, previous.as_ref());
+    let parsed: coomi_services::McpServerConfig = serde_json::from_value(request.config)
+        .map_err(|error| ApiError::bad_request(format!("invalid MCP config: {error}")))?;
+    let status = tokio::time::timeout(
+        Duration::from_secs(12),
+        state.mcp_runtime.test_config(request.name.trim(), &parsed),
+    ).await.map_err(|_| ApiError::bad_gateway("MCP connection test timed out"))?
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "ok": status.error.is_none(),
+        "transport": status.transport,
+        "tools_count": status.tools_count,
+        "error": status.error.map(|text| text.chars().take(300).collect::<String>()),
+    })))
 }
 
 /// 导出会话为 JSON / Markdown / JSONL。
@@ -6622,7 +6895,7 @@ async fn handle_command(
                 .get("effort")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if !matches!(effort, "auto" | "low" | "medium" | "high" | "xhigh") {
+            if !matches!(effort, "off" | "auto" | "low" | "medium" | "high" | "xhigh") {
                 context.send_error(envelope_id, "invalid reasoning effort");
                 return;
             }
@@ -8337,19 +8610,19 @@ impl AgentObserver for BrowserObserver {
                 }));
             }
             AgentEvent::PlanUpdated(plan) => {
-                if let Some((index, step)) = plan
-                    .steps
-                    .iter()
-                    .enumerate()
-                    .find(|(_, step)| step.status == PlanStepStatus::InProgress)
-                {
-                    self.task.push_event(json!({
-                        "event_type": "loop_step_start",
-                        "step_index": index + 1,
-                        "step_description": step.step,
-                        "total_steps": plan.steps.len(),
-                    }));
-                }
+                // 推送完整计划给前端，不再用 Loop 轮数冒充计划进度
+                self.task.push_event(json!({
+                    "event_type": "plan_updated",
+                    "explanation": plan.explanation,
+                    "steps": plan.steps.iter().map(|s| json!({
+                        "step": s.step,
+                        "status": match s.status {
+                            PlanStepStatus::Pending => "pending",
+                            PlanStepStatus::InProgress => "in_progress",
+                            PlanStepStatus::Completed => "completed",
+                        },
+                    })).collect::<Vec<_>>(),
+                }));
             }
             AgentEvent::LoopUpdated(loop_state) => {
                 self.task.push_event(json!({
@@ -9564,6 +9837,7 @@ mod tests {
                 configured_connection_settings(&home).max_concurrent_tasks,
             )),
             task_manager: Arc::clone(&task_manager),
+            mcp_runtime: Arc::new(McpRuntime::default()),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             registry_cache: Arc::new(StdMutex::new(None)),
             workflow_scheduler: crate::workflow::WorkflowScheduler::new(&home),

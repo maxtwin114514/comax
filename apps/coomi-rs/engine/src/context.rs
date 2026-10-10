@@ -12,6 +12,12 @@ use uuid::Uuid;
 
 const BASELINE_TOKENS: u64 = 12_000;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: u64 = 20_000;
+/// 压缩后历史的目标体积：auto_compact_token_limit 的 50%
+/// （auto_compact_limit 默认 = 窗口 90%，因此压缩后约剩 45% 窗口）。
+/// 留下足够余量，避免「压缩完立刻又触发压缩」的连环压缩 / 越压越大。
+const COMPACTION_TARGET_PERCENT: u64 = 50;
+/// 单条压缩摘要的最大长度（超出会被截断，防止摘要本身把历史撑大）。
+const SUMMARY_MAX_TOKENS: u64 = 6_000;
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT: &str =
     "Output exceeded the available model context and was truncated";
 
@@ -217,8 +223,51 @@ pub fn estimate_request_tokens(
 
 pub fn compacted_history(messages: &[ChatMessage], summary: &str) -> Vec<ChatMessage> {
     let mut compacted = retained_user_history(messages);
-    compacted.push(ChatMessage::summary(format!("{SUMMARY_PREFIX}\n{summary}")));
+    let capped = truncate_text_to_tokens(summary, SUMMARY_MAX_TOKENS);
+    compacted.push(ChatMessage::summary(format!("{SUMMARY_PREFIX}\n{capped}")));
     compacted
+}
+
+/// 压缩结果的后处理：确保每次压缩都「真正变小」，避免越压越大。
+///
+/// 1. 只保留最近一条压缩摘要（远端端点可能把历史里的旧摘要原样回传），
+///    摘要始终保留并放在末尾，绝不被裁剪掉；
+/// 2. 摘要内容超长则截断；
+/// 3. 整体收缩到 target 以内（从最旧的非摘要消息开始丢弃 / 截断工具结果，
+///    摘要位于末尾，不会被 trim_history_to_fit 的前端删除逻辑误删）。
+pub fn trim_compacted_history(
+    system_prompt: &str,
+    messages: &mut Vec<ChatMessage>,
+    tools: &[ToolSpec],
+    target_tokens: u64,
+) {
+    let mut summary: Option<ChatMessage> = None;
+    messages.retain(|message| {
+        if message.compaction_summary {
+            if summary.is_none() {
+                summary = Some(message.clone());
+            }
+            false
+        } else {
+            true
+        }
+    });
+    if let Some(mut message) = summary {
+        if estimate_text_tokens(&message.content) > SUMMARY_MAX_TOKENS {
+            message.content = truncate_text_to_tokens(&message.content, SUMMARY_MAX_TOKENS);
+        }
+        messages.push(message);
+    }
+    trim_history_to_fit(system_prompt, messages, tools, target_tokens.max(1));
+}
+
+/// 本轮压缩的目标体积（auto_compact_token_limit 的 50%，至少 1）。
+pub fn compaction_target_tokens(capabilities: &ModelCapabilities) -> u64 {
+    capabilities
+        .auto_compact_token_limit()
+        .saturating_mul(COMPACTION_TARGET_PERCENT)
+        .saturating_div(100)
+        .max(1)
 }
 
 pub fn retained_user_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -355,5 +404,56 @@ mod tests {
         assert_eq!(state.compaction_count, 1);
         assert_eq!(state.first_window_id, state.previous_window_id);
         assert_ne!(state.previous_window_id, state.window_id);
+    }
+
+    #[test]
+    fn trim_compacted_history_drops_stale_summaries_and_shrinks() {
+        let capabilities = ModelCapabilities {
+            context_window: 256_000,
+            auto_compact_token_limit: Some(2_000),
+            ..ModelCapabilities::default()
+        };
+        // auto_compact_limit = min(2000, 窗口*9/10) = 2000 → 目标 1000。
+        let mut messages = vec![
+            ChatMessage::summary(format!("{SUMMARY_PREFIX}\nold summary one")),
+            ChatMessage::user("first"),
+            ChatMessage::summary(format!("{SUMMARY_PREFIX}\nold summary two")),
+            ChatMessage::user("second"),
+        ];
+        for message in &mut messages {
+            if message.role == Role::User {
+                message.content = "x".repeat(40_000);
+            }
+        }
+        let target = compaction_target_tokens(&capabilities);
+        assert_eq!(target, 1_000);
+        trim_compacted_history("system", &mut messages, &[], target);
+        // 只保留一条摘要（去重），且整体收缩到目标内。
+        let summaries = messages
+            .iter()
+            .filter(|m| m.compaction_summary)
+            .count();
+        assert_eq!(summaries, 1);
+        let after = estimate_request_tokens("system", &messages, &[]);
+        // trim_history_to_fit 的截断按逐消息 +32 字节开销估算，允许少量舍入。
+        assert!(
+            after <= target + 64,
+            "compacted history must fit the target: {after} > {target}"
+        );
+        // 关键不变量：压缩后必须远低于自动压缩阈值，否则会立刻再次触发压缩。
+        assert!(
+            after < capabilities.auto_compact_token_limit(),
+            "compaction must leave margin below the auto limit: {after}"
+        );
+    }
+
+    #[test]
+    fn compaction_target_is_half_of_auto_limit() {
+        let capabilities = ModelCapabilities {
+            context_window: 200_000,
+            ..ModelCapabilities::default()
+        };
+        // auto_compact_token_limit 默认 = 窗口*9/10 = 180_000 → 目标 90_000。
+        assert_eq!(compaction_target_tokens(&capabilities), 90_000);
     }
 }

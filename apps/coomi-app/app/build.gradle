@@ -74,7 +74,7 @@ android {
         targetSdkVersion coomiTargetSdk
         // Keep the executable Termux bootstrap security domain for v1.4.0.
         versionCode 78
-        versionName "1.5.2-flash"
+        versionName "1.5.2o1"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)

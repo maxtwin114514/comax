@@ -10,7 +10,7 @@ import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
 import { authedFetch } from '@/bridge/http'
-import type { PermissionMode } from '@/protocol/commands'
+import type { PermissionMode, ReasoningEffort } from '@/protocol/commands'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 
@@ -120,8 +120,57 @@ function isCurrent(providerId: string, model: string): boolean {
   return config.currentProviderId === providerId && config.currentModel === model
 }
 
+// ── 推理强度自适应：按当前模型能力检测支持的档位（需求 10）──
+interface ReasoningCaps { supported: boolean; efforts: string[]; source: string; can_disable: boolean }
+const reasoningCaps = ref<ReasoningCaps | null>(null)
+const reasoningLoading = ref(false)
+const reasoningError = ref('')
+
+async function fetchModelCapabilities() {
+  if (!config.currentProviderId || !config.currentModel) return
+  reasoningLoading.value = true
+  reasoningError.value = ''
+  try {
+    const res = await authedFetch(
+      `/api/model-capabilities?provider_id=${encodeURIComponent(config.currentProviderId)}&model=${encodeURIComponent(config.currentModel)}`,
+    )
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    reasoningCaps.value = data.reasoning ?? null
+  } catch (e) {
+    reasoningError.value = `能力检测失败：${e instanceof Error ? e.message : String(e)}`
+    reasoningCaps.value = null
+  } finally {
+    reasoningLoading.value = false
+  }
+}
+
+/** 当前模型实际可用的强度档位（引擎返回的 efforts + 关闭/自动）。 */
+const availableEfforts = computed(() => {
+  const caps = reasoningCaps.value
+  if (!caps) return REASONING_EFFORTS
+  const allowed = new Set<string>(['off', 'auto', ...(caps.efforts ?? [])])
+  if (caps.can_disable === false) allowed.delete('off')
+  return REASONING_EFFORTS.filter(item => allowed.has(item.value))
+})
+
+/** 拖拽滑块值：0=off 1=auto 2=low 3=medium 4=high 5=xhigh（按可用档位动态映射）。 */
+const effortSlider = computed({
+  get: () => {
+    const list = availableEfforts.value.map(e => e.value)
+    const idx = list.indexOf(config.reasoningEffort)
+    return idx >= 0 ? idx : 1
+  },
+  set: (v: number) => {
+    const list = availableEfforts.value.map(e => e.value)
+    const effort = (list[v] ?? 'auto') as ReasoningEffort
+    session.setReasoningEffort(effort)
+  },
+})
+
 /** 进入设置页时拉取定制提示词与统计开关状态（旧引擎无统计接口时保持默认）。 */
 onMounted(async () => {
+  void fetchModelCapabilities()
   void config.fetchCustomPrompt()
   if (await config.fetchConnectionSettings()) {
     connectionDraft.value = { ...config.connectionSettings }
@@ -194,9 +243,28 @@ onMounted(async () => {
 
       <p class="sec-label">推理强度</p>
       <div class="group compact-options">
-        <button v-for="item in REASONING_EFFORTS" :key="item.value" class="option" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">
+        <button v-for="item in availableEfforts" :key="item.value" class="option" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">
           {{ item.label }}
         </button>
+      </div>
+      <div class="group reasoning-slider">
+        <div class="slider-row">
+          <span class="slider-label">拖拽调节</span>
+          <span class="slider-value">{{ (availableEfforts[effortSlider]?.label ?? '自动') }}</span>
+        </div>
+        <input v-model.number="effortSlider" type="range" min="0" :max="availableEfforts.length - 1" step="1" class="range" aria-label="推理强度滑块" />
+        <div class="slider-marks">
+          <span v-for="(item, i) in availableEfforts" :key="item.value" class="mark" :class="{ on: effortSlider === i }">{{ item.label }}</span>
+        </div>
+        <p class="option-note">
+          <template v-if="reasoningLoading">正在检测当前模型支持的思考档位…</template>
+          <template v-else-if="reasoningError">{{ reasoningError }}</template>
+          <template v-else-if="reasoningCaps">
+            当前模型已自动检测（{{ reasoningCaps.source === 'model-name' ? '按模型名推断' : '来自模型配置' }}），
+            仅显示其支持的档位<template v-if="reasoningCaps.can_disable === false">；该模型不支持关闭思考</template>。
+          </template>
+          <template v-else>按当前模型自动检测可用的思考档位（自动/低/中/高…），不兼容的档位不显示。</template>
+        </p>
       </div>
 
       <p class="sec-label">狂暴模型</p>
@@ -413,4 +481,16 @@ onMounted(async () => {
 .conn i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .conn.on i { background: var(--ok); }
 .sid { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
+.reasoning-slider { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.slider-row { display: flex; align-items: center; justify-content: space-between; }
+.slider-label { font-size: 12.5px; color: var(--text-2); }
+.slider-value { font-size: 13px; font-weight: 650; color: var(--blue); }
+.range { width: 100%; height: 4px; accent-color: var(--blue); appearance: none; background: var(--fill-strong); border-radius: 2px; }
+.range::-webkit-slider-thumb {
+  width: 16px; height: 16px; border-radius: 50%; border: 0;
+  background: var(--blue); box-shadow: 0 1px 4px rgba(0,0,0,.25);
+  appearance: none; cursor: pointer;
+}
+.slider-marks { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-3); }
+.slider-marks .mark.on { color: var(--blue); font-weight: 650; }
 </style>

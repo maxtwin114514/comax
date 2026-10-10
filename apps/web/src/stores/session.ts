@@ -13,8 +13,8 @@ import { useConfigStore } from './config'
 import { useSessionsStore } from './sessions'
 import { isGlobalSession as isGlobalSessionId } from '@/bridge/life'
 import { router } from '@/router'
-import { pushStatus as pushControlStatus, pushTrace, setControlModeActive } from '@/bridge/controlFloat'
-import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace, UserMessage } from './viewModel'
+import { pushStatus as pushControlStatus, pushTrace, setControlLine, setControlModeActive } from '@/bridge/controlFloat'
+import type { AssistantMessage, LoopProgress, PlanProgress, PlanStep, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace, UserMessage } from './viewModel'
 
 export const useSessionStore = defineStore('session', () => {
   const connection = useConnectionStore()
@@ -41,6 +41,8 @@ export const useSessionStore = defineStore('session', () => {
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
+  /** 计划进度由引擎 plan_updated 事件驱动（完整步骤列表），与持久化 loop 分离。 */
+  const plan = ref<PlanProgress>({ active: false, steps: [] })
   /** 生命体待投递问候（队列唯一 pending → 气泡/开场问候的数据源）。 */
   const lifeUnread = ref<LifeUnreadItem[]>([])
   const lifeUnreadName = ref('')
@@ -56,27 +58,10 @@ export const useSessionStore = defineStore('session', () => {
   let currentAssistant: AssistantMessage | null = null
 
   /**
-   * 控制模式悬浮层的思考缓冲。
-   *
-   * reasoning_chunk 是按 token 来的，一秒能来几十条。逐条转发到原生层会不停跨进程调用、
-   * 把悬浮层刷成走马灯。所以攒一段再送：要么攒够长度，要么静了 500ms。
+   * 控制模式：思考片段逐个 token 到达，逐条转发到原生层会把悬浮层刷成走马灯、
+   * 且每条都弹「正在思考」。改为合并成一条单行状态（覆盖更新），
+   * 由原生顶层 TextView 显示，不再追加到悬浮框列表。
    */
-  let floatReasoningBuffer = ''
-  let floatReasoningTimer: ReturnType<typeof setTimeout> | null = null
-
-  function queueFloatReasoning(chunk: string) {
-    floatReasoningBuffer += chunk
-    if (floatReasoningBuffer.length >= 300) { flushFloatReasoning(); return }
-    if (floatReasoningTimer) return
-    floatReasoningTimer = setTimeout(flushFloatReasoning, 500)
-  }
-
-  function flushFloatReasoning() {
-    if (floatReasoningTimer) { clearTimeout(floatReasoningTimer); floatReasoningTimer = null }
-    const text = floatReasoningBuffer.trim()
-    floatReasoningBuffer = ''
-    if (text) pushTrace('思考', text)
-  }
 
   /**
    * 把工具参数压成一行给悬浮层看。
@@ -235,11 +220,13 @@ export const useSessionStore = defineStore('session', () => {
           return
         }
         lastEventSeq = seq
-        if (isForeground) onInbound(env)
+        // 页面隐藏（切后台/锁屏）时照常 ACK，但不逐条改 UI：避免返回时逐字蹦出。
+        // 恢复可见时由 ChatView 的 visibilitychange 触发一次权威快照恢复。
+        if (isForeground && !document.hidden) onInbound(env)
         t.send({ command: 'ack_event', event_seq: seq })
         return
       }
-      if (isForeground) onInbound(env)
+      if (isForeground && !document.hidden) onInbound(env)
     })
     t.connect()
   }
@@ -270,21 +257,26 @@ export const useSessionStore = defineStore('session', () => {
   function applyEvent(ev: AgentEvent) {
     switch (ev.event_type) {
       // 兜底：turn_end 之后又开始吐字（引擎续了一轮），状态得跟着回到忙。
-      case 'text_chunk': connection.setRetry(null); if (runState.value === 'idle') runState.value = 'thinking'; appendAssistant(ev.content); pushControlStatus('正在输出'); break
+      case 'text_chunk': connection.setRetry(null); if (runState.value === 'idle') runState.value = 'thinking'; appendAssistant(ev.content); setControlLine('正在输出'); break
       case 'reasoning_chunk':
         if (runState.value === 'idle') runState.value = 'thinking'
         appendReasoning(ev.content)
-        // 控制模式：思考片段同步到桌面悬浮层。用户此时多半已经切到目标 App，
-        // 悬浮层是他唯一能看到「它在想什么」的地方。
-        pushControlStatus('正在思考')
-        queueFloatReasoning(ev.content)
+        // 控制模式：思考片段合并成单行状态覆盖显示（不再逐字追加、不再弹「正在思考」）。
+        setControlLine(ev.content)
         break
+      case 'plan_updated': {
+        plan.value = {
+          active: true,
+          steps: (ev.steps ?? []).map(s => ({ step: s.step, status: s.status })),
+          explanation: ev.explanation,
+        }
+        break
+      }
       case 'tool_start':
         connection.setRetry(null)
         endAssistantStream()
         timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
-        flushFloatReasoning()
-        pushControlStatus(`正在调用 ${ev.tool_name}`)
+        setControlLine(`正在调用 ${ev.tool_name}`)
         // summarizeArguments 返回的是结构化的摘要对象，转发给悬浮层要转成一行文字
         pushTrace(`调用工具 ${ev.tool_name}`, describeFloatArguments(ev.arguments))
         turnToolTrace.push({
@@ -389,9 +381,12 @@ export const useSessionStore = defineStore('session', () => {
           reasoningEfforts: ev.reasoning_efforts ?? previous?.reasoningEfforts ?? {},
           contextCategories: ev.context_categories ?? previous?.contextCategories ?? {},
         }
+        if (ev.usage?.total_tokens != null) {
+          sessions.updateTokens(sessionId.value, ev.usage.total_tokens)
+        }
         break
       }
-      case 'compression': pushNotice('info', `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}`); break
+            case 'compression': pushNotice('info', `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}`); break
       case 'connection_retry': connection.setRetry(`${ev.message}（${ev.attempt}/${ev.max_attempts}）`); break
       case 'stream_reset':
         endAssistantStream()
@@ -420,6 +415,9 @@ export const useSessionStore = defineStore('session', () => {
       case 'bg_task_completed': pushNotice(ev.is_error ? 'error' : 'success', `${ev.is_error ? '✕' : '✓'} 后台任务 #${ev.task_id} ${ev.is_error ? '失败' : '完成'}`); break
       case 'loop_progress':
         loop.value = { active: ev.status !== 'done', currentStep: ev.current_step, totalSteps: ev.total_steps, status: ev.status, currentDescription: loop.value.currentDescription }
+        if (ev.status !== 'done' && plan.value.steps.length === 0) {
+          plan.value = { ...plan.value, active: true }
+        }
         break
       case 'loop_step_start':
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
@@ -434,6 +432,7 @@ export const useSessionStore = defineStore('session', () => {
       }
       case 'turn_end':
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
+        plan.value = { active: false, steps: [] }
         {
           const failures = turnToolTrace.filter(item => item.status === 'error').length
           if (maxConsecutiveToolFailures >= 3 && !failureNoticeCreated) {
@@ -477,6 +476,9 @@ export const useSessionStore = defineStore('session', () => {
           turnOutputTokens: usage.value?.turnOutputTokens ?? 0,
           reasoningEfforts: usage.value?.reasoningEfforts ?? {},
           contextCategories: usage.value?.contextCategories ?? {},
+        }
+        if (u.total_tokens != null) {
+          sessions.updateTokens(sessionId.value, u.total_tokens)
         }
         if (typeof ev.cwd === 'string' && ev.cwd) cwd.value = ev.cwd
         break
@@ -925,7 +927,7 @@ export const useSessionStore = defineStore('session', () => {
 
   function toggleLifeStats() { lifeStatsOpen.value = !lifeStatsOpen.value }
 
-  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
+  return { sessionId, mode, timeline, runState, usage, plan, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, restoreFromEngine, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }

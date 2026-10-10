@@ -174,6 +174,137 @@ function closeInstallForm() {
   installValues.value = {}
 }
 
+// ── 自定义 MCP 详细配置（需求：自建 MCP，可配 stdio/sse/http，环境变量、headers、参数）──
+interface McpServerForm {
+  name: string
+  transport: 'stdio' | 'sse' | 'http'
+  command: string
+  args: string
+  env: string
+  cwd: string
+  url: string
+  headers: string
+  framing: string
+  enabled: boolean
+}
+const showMcpForm = ref(false)
+const editingMcpName = ref<string | null>(null)
+const mcpForm = ref<McpServerForm>({ name: '', transport: 'stdio', command: '', args: '', env: '', cwd: '', url: '', headers: '', framing: '', enabled: true })
+const mcpFormBusy = ref(false)
+const mcpTestMsg = ref('')
+
+function resetMcpForm() {
+  mcpForm.value = { name: '', transport: 'stdio', command: '', args: '', env: '', cwd: '', url: '', headers: '', framing: '', enabled: true }
+  editingMcpName.value = null
+  mcpTestMsg.value = ''
+}
+
+function openNewMcp() {
+  resetMcpForm()
+  showMcpForm.value = true
+}
+
+async function openEditMcp(item: McpItem) {
+  showMcpForm.value = true
+  editingMcpName.value = item.name
+  mcpTestMsg.value = ''
+  mcpFormBusy.value = true
+  try {
+    const res = await authedFetch(`/api/mcp/servers/${encodeURIComponent(item.name)}`)
+    const data = await parseRes(res)
+    const c = data.config ?? {}
+    mcpForm.value = {
+      name: item.name,
+      transport: (['stdio', 'sse', 'http'].includes(c.transport) ? c.transport : 'stdio'),
+      command: c.command ?? '',
+      args: Array.isArray(c.args) ? c.args.join('\n') : '',
+      env: Object.entries(c.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'),
+      cwd: c.cwd ?? '',
+      url: c.url ?? '',
+      headers: Object.entries(c.headers ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'),
+      framing: c.framing ?? '',
+      enabled: c.enabled !== false,
+    }
+  } catch (e) {
+    mcpTestMsg.value = `加载配置失败：${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    mcpFormBusy.value = false
+  }
+}
+
+function parseKeyValueLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const line of text.split(/\r?\n/)) {
+    const idx = line.indexOf('=')
+    if (idx <= 0) continue
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
+  }
+  return out
+}
+
+function mcpFormToConfig() {
+  const f = mcpForm.value
+  const args = f.args.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+  return {
+    transport: f.transport,
+    enabled: f.enabled,
+    command: f.command.trim(),
+    args,
+    env: parseKeyValueLines(f.env),
+    cwd: f.cwd.trim(),
+    url: f.url.trim(),
+    headers: parseKeyValueLines(f.headers),
+    framing: f.framing.trim(),
+  }
+}
+
+async function saveMcp() {
+  const f = mcpForm.value
+  const name = f.name.trim()
+  if (!name) { mcpTestMsg.value = '请填写名称'; return }
+  mcpFormBusy.value = true
+  mcpTestMsg.value = ''
+  try {
+    const url = editingMcpName.value
+      ? `/api/mcp/servers/${encodeURIComponent(editingMcpName.value)}`
+      : '/api/mcp/servers'
+    const res = await authedFetch(url, {
+      method: editingMcpName.value ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, config: mcpFormToConfig() }),
+    })
+    await parseRes(res)
+    showMcpForm.value = false
+    notice.value = editingMcpName.value ? `已更新 MCP「${name}」` : `已创建 MCP「${name}」`
+    await loadInstalled()
+  } catch (e) {
+    mcpTestMsg.value = `保存失败：${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    mcpFormBusy.value = false
+  }
+}
+
+async function testMcp() {
+  const f = mcpForm.value
+  const name = f.name.trim() || editingMcpName.value
+  if (!name) { mcpTestMsg.value = '请先填写名称'; return }
+  mcpFormBusy.value = true
+  mcpTestMsg.value = '测试中…'
+  try {
+    const res = await authedFetch('/api/mcp/servers/_/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, config: mcpFormToConfig() }),
+    })
+    const data = await parseRes(res)
+    mcpTestMsg.value = (data.status ?? 'ok') === 'ok' ? '连接成功 ✓' : `连接失败：${data.error ?? ''}`
+  } catch (e) {
+    mcpTestMsg.value = `测试失败：${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    mcpFormBusy.value = false
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -494,6 +625,12 @@ function goDashboard() {
 
       <!-- MCP（市场视图在下方独立渲染） -->
       <template v-if="tab === 'mcp' && scope !== 'market'">
+        <div class="custom-row">
+          <button class="custom-btn" @click="openNewMcp">
+            <CoomiIcon name="plus" :size="15" /> 新建自定义 MCP
+          </button>
+          <span class="custom-hint">填写命令/URL、参数、环境变量与请求头，可先测试连接再保存</span>
+        </div>
         <p v-if="!loading && visibleMcp.length === 0" class="hint">
           {{ scope === 'installed' ? '本机还没有已安装的 MCP Server。' : '目录为空，暂时没有可安装的 MCP Server。' }}
         </p>
@@ -519,6 +656,7 @@ function goDashboard() {
                   <button class="act" :disabled="busy !== null" @click.stop="setEnabled('mcp', item, !item.enabled)">
                     {{ item.enabled ? '停用' : '启用' }}
                   </button>
+                  <button class="act" :disabled="busy !== null" @click.stop="openEditMcp(item)">配置</button>
                   <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('mcp', item)">删除</button>
                 </template>
                 <button v-else class="act" :disabled="busy !== null" @click.stop="confirmMcpInstall(item)">
@@ -729,7 +867,68 @@ function goDashboard() {
           </div>
         </div>
       </div>
-    </main>
+    
+        <!-- 自定义 MCP 详细配置表单 -->
+        <div v-if="showMcpForm" class="sheet-mask" @click.self="showMcpForm = false">
+          <div class="sheet mcp-form-sheet">
+            <div class="grip" />
+            <div class="stitle">
+              <CoomiIcon name="plug" :size="17" />
+              {{ editingMcpName ? `配置 MCP「${editingMcpName}」` : '新建自定义 MCP' }}
+            </div>
+            <label class="field">
+              <span>名称<em class="req">必填</em></span>
+              <input v-model="mcpForm.name" :disabled="!!editingMcpName" placeholder="例如 my-fileserver" />
+            </label>
+            <label class="field">
+              <span>传输方式</span>
+              <select v-model="mcpForm.transport" class="select">
+                <option value="stdio">stdio（本地命令）</option>
+                <option value="sse">SSE（远程 URL）</option>
+                <option value="http">HTTP（远程 URL）</option>
+              </select>
+            </label>
+            <label v-if="mcpForm.transport === 'stdio'" class="field">
+              <span>启动命令<em class="req">必填</em></span>
+              <input v-model="mcpForm.command" placeholder="例如 npx 或 /usr/bin/python3" />
+            </label>
+            <label v-if="mcpForm.transport === 'stdio'" class="field">
+              <span>命令参数（每行一个）</span>
+              <textarea v-model="mcpForm.args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/workspace" />
+            </label>
+            <label v-if="mcpForm.transport === 'stdio'" class="field">
+              <span>工作目录 cwd</span>
+              <input v-model="mcpForm.cwd" placeholder="可选，默认引擎家目录" />
+            </label>
+            <label v-else class="field">
+              <span>服务 URL<em class="req">必填</em></span>
+              <input v-model="mcpForm.url" placeholder="https://host/mcp" />
+            </label>
+            <label class="field">
+              <span>环境变量（每行 KEY=VALUE）</span>
+              <textarea v-model="mcpForm.env" rows="3" placeholder="API_KEY=sk-xxx&#10;DEBUG=true" />
+            </label>
+            <label v-if="mcpForm.transport !== 'stdio'" class="field">
+              <span>请求头（每行 KEY=VALUE）</span>
+              <textarea v-model="mcpForm.headers" rows="2" placeholder="Authorization=Bearer xxx" />
+            </label>
+            <label class="field">
+              <span>消息帧格式 framing</span>
+              <input v-model="mcpForm.framing" placeholder="可选，默认按传输方式自动选择" />
+            </label>
+            <label class="field switch-row">
+              <span>启用</span>
+              <input type="checkbox" v-model="mcpForm.enabled" class="switch" />
+            </label>
+            <p v-if="mcpTestMsg" class="notice" :class="{ err: mcpTestMsg.startsWith('保存失败') || mcpTestMsg.startsWith('测试失败') || mcpTestMsg.startsWith('连接失败') || mcpTestMsg.startsWith('加载配置失败') }">{{ mcpTestMsg }}</p>
+            <div class="sheet-actions">
+              <button class="btn ghost" :disabled="mcpFormBusy" @click="showMcpForm = false">取消</button>
+              <button class="btn ghost" :disabled="mcpFormBusy" @click="testMcp">{{ mcpFormBusy && mcpTestMsg.startsWith('测试中') ? '测试中…' : '测试连接' }}</button>
+              <button class="btn primary" :disabled="mcpFormBusy" @click="saveMcp">{{ mcpFormBusy && !mcpTestMsg.startsWith('测试中') ? '保存中…' : '保存' }}</button>
+            </div>
+          </div>
+        </div>
+      </main>
   </div>
 </template>
 
@@ -907,6 +1106,26 @@ function goDashboard() {
   height: 42px; padding: 0 12px; border-radius: var(--r-md); border: 1px solid var(--border);
   background: var(--bg-input); color: var(--text); font-size: 15px;
 }
+.custom-row { display: flex; align-items: center; gap: 10px; margin: 2px 0 12px; }
+.custom-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 14px; border-radius: var(--r-md);
+  border: 1px dashed var(--blue); background: var(--blue-soft); color: var(--blue);
+  font-size: 13.5px; font-weight: 600;
+}
+.custom-hint { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-3); }
+.mcp-form-sheet { max-height: 86vh; overflow-y: auto; }
+.select {
+  height: 42px; padding: 0 10px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: var(--bg-input); color: var(--text); font-size: 15px;
+}
+.field textarea {
+  width: 100%; padding: 10px 12px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: var(--bg-input); color: var(--text);
+  font-size: 13.5px; font-family: inherit; resize: vertical;
+}
+.switch-row { flex-direction: row; align-items: center; justify-content: space-between; }
+.switch { width: 40px; height: 22px; accent-color: var(--blue); }
 .sheet-actions { display: flex; gap: 10px; margin-top: 18px; }
 .sheet-actions .btn { flex: 1; }
 .btn { min-height: 42px; border-radius: var(--r-md); font-size: 14.5px; font-weight: 600; }

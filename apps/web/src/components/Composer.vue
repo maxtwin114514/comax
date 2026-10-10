@@ -396,10 +396,12 @@ watch(text, () => {
 
 <template>
   <div class="composer">
-    <div v-if="session.pendingEdit" class="edit-banner">
-      <span>正在编辑上一条消息，发送将覆盖该轮执行</span>
-      <button @click="session.cancelEditMessage()">取消编辑</button>
-    </div>
+    <Transition name="banner">
+      <div v-if="session.pendingEdit" class="edit-banner">
+        <span>正在编辑上一条消息，发送将覆盖该轮执行</span>
+        <button @click="session.cancelEditMessage()">取消编辑</button>
+      </div>
+    </Transition>
     <div v-if="transferText" class="transfer">
       <span>{{ transferText }}</span><progress :value="transferProgress" max="100" />
     </div>
@@ -782,4 +784,7 @@ watch(text, () => {
 .slash-item code { font-family: inherit; font-size: 13.5px; font-weight: 700; color: var(--blue); }
 .slash-item span { font-size: 12.5px; color: var(--text-2); }
 .slash-item:active { background: var(--blue-soft); }
+.banner-enter-active, .banner-leave-active { transition: opacity .22s ease, transform .22s ease; }
+.banner-enter-from { opacity: 0; transform: translateY(-6px); }
+.banner-leave-to { opacity: 0; transform: translateY(-4px); }
 </style>
