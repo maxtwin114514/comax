@@ -193,6 +193,24 @@ impl CoreTools {
     async fn dispatch(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         match Self::canonical_tool_name(call.name.as_str()) {
             "read_file" => self.read_file(&call.arguments).await,
+            "read_note" => {
+                let Some(home) = self.config_home.as_ref() else { return ToolResult::error("notes unavailable"); };
+                let Some(id) = string_arg(&call.arguments, "id") else { return ToolResult::error("missing note id"); };
+                // 个人笔记是私有文档：只有用户显式在消息里给出笔记 ID 才允许读取，
+                // Agent 绝不主动枚举或读取。
+                if !self.parent_history.iter().rev()
+                    .find(|m| m.role == coomi_engine::Role::User && !m.internal)
+                    .is_some_and(|m| m.content.contains(id))
+                {
+                    return ToolResult::error("personal notes require an explicit note reference from the user");
+                }
+                match coomi_services::read_personal_note(home, id) {
+                    Ok((note, content)) => ToolResult::success(
+                        serde_json::json!({"title": note.title, "content": content}).to_string(),
+                    ),
+                    Err(_) => ToolResult::error("note unavailable; ask the user to select it again"),
+                }
+            },
             "write_file" => self.write_file(&call.arguments).await,
             "edit_file" => self.edit_file(&call.arguments).await,
             "list_dir" => self.list_dir(&call.arguments),
@@ -2822,6 +2840,17 @@ fn memory_specs() -> Vec<ToolSpec> {
             name: "memory_list".into(),
             description: "List persistent memories using local, project, then global precedence.".into(),
             parameters: json!({"type":"object","properties":{},"additionalProperties":false}),
+        },
+        ToolSpec {
+            name: "read_note".into(),
+            description: "Read a personal TXT note only when the user explicitly supplies its note ID and asks to read it. Never proactively read or enumerate personal notes.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Note ID supplied by the user"}
+                },
+                "required": ["id"],
+            }),
         },
         ToolSpec {
             name: "memory_read".into(),

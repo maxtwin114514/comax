@@ -36,6 +36,7 @@ export const router = createRouter({
     { path: '/browser', name: 'browser', component: () => import('@/views/BrowserView.vue') },
     { path: '/hooks', name: 'hooks', component: () => import('@/views/HooksView.vue') },
     { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },
+    { path: '/notes', name: 'notes', component: () => import('@/views/NotesView.vue') },
     { path: '/files', name: 'files', component: () => import('@/views/FileManagerView.vue') },
     { path: '/maintenance', name: 'maintenance', component: () => import('@/views/MaintenanceView.vue') },
     { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue') },

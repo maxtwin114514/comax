@@ -1279,6 +1279,9 @@ mod tests {
             joined.contains("PATH=/opt/coomi-dev/current/bin:/opt/coomi-dev/bin:/usr/local/sbin")
         );
         assert!(command.environment.contains_key("PROOT_TMP_DIR"));
-        assert!(!joined.contains("/storage/emulated"));
+        // Comax 魔改：显式授权手机存储挂载点（/storage/emulated/0 与 /sdcard），
+        // 便于 Agent 直接访问真实手机目录；上游原版禁止这些挂载。
+        assert!(joined.contains("/storage/emulated/0:/storage/emulated/0"));
+        assert!(joined.contains("/sdcard:/sdcard"));
     }
 }

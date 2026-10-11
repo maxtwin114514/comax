@@ -141,6 +141,7 @@ function openDashboard() {
         <button class="entry" @click="go('/im')"><CoomiIcon name="chat" :size="17" /><span>群聊</span></button>
         <button class="entry" @click="go('/catalog')"><CoomiIcon name="cube" :size="17" /><span>拓展</span></button>
         <button class="entry" @click="go('/browser')"><CoomiIcon name="globe" :size="17" /><span>浏览器</span></button>
+        <button class="entry" @click="go('/notes')"><CoomiIcon name="notebook" :size="17" /><span>记忆库</span></button>
       </div>
       <button class="taskrow" @click="go('/tasks')">
         <CoomiIcon name="subtask" :size="17" />

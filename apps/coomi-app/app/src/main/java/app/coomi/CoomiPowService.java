@@ -87,10 +87,10 @@ public final class CoomiPowService {
     }
 
     private File queueDir(Context context) {
-        File home = context.getFilesDir();
-        // 引擎的 --home 是 <files>/home/.coomi，这里对齐到同一个目录。
-        File filesHome = new File(home, "home");
-        File coomi = new File(filesHome, ".coomi");
+        // 与 Rust 引擎的 --home 对齐：TermuxConstants.TERMUX_HOME_DIR_PATH + "/.coomi"。
+        // 不要用 context.getFilesDir() 手拼目录，包名变化/共享 UID 场景会对不上。
+        File home = new File(com.termux.shared.termux.TermuxConstants.TERMUX_HOME_DIR_PATH);
+        File coomi = new File(home, ".coomi");
         File dir = new File(coomi, "control/pow");
         if (!dir.isDirectory() && !dir.mkdirs()) return null;
         return dir;

@@ -27,10 +27,10 @@ pub fn normalize_balance(value: &Value) -> Option<Value> {
         return Some(json!({"balances":[{"currency":data.get("currency").and_then(Value::as_str).unwrap_or("CNY"),"amount":balance}]}));
     }
     if let (Some(total), Some(used)) = (data.get("total_credits").and_then(amount), data.get("total_usage").and_then(amount)) {
-        return Some(json!({"balances":[{"currency":"USD","amount":total-used}]}));
+        return Some(json!({"balances":[{"currency":data.get("currency").and_then(Value::as_str).unwrap_or("CNY"),"amount":total-used}]}));
     }
     if let Some(remaining) = data.get("limit_remaining").and_then(amount) {
-        return Some(json!({"balances":[{"currency":"USD","amount":remaining}]}));
+        return Some(json!({"balances":[{"currency":data.get("currency").and_then(Value::as_str).unwrap_or("CNY"),"amount":remaining}]}));
     }
     None
 }

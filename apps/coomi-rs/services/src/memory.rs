@@ -214,7 +214,16 @@ impl MemoryManager {
 
     pub fn prompt_context(&self) -> String {
         let mut output = String::new();
-        for memory in self.list().into_iter().filter(|memory| !memory.stale) {
+        // 只自动注入 Core（核心）与 Stable（稳定）记忆：它们被反复命中、确实重要。
+        // Candidate 与 stale 不自动进入上下文，避免杂讯与 token 膨胀；
+        // 模型需要时可用 memory_search / memory_read 按需查询。
+        for memory in self
+            .list()
+            .into_iter()
+            .filter(|memory| {
+                !memory.stale && matches!(memory.lifecycle, MemoryLifecycle::Core | MemoryLifecycle::Stable)
+            })
+        {
             let entry = format!(
                 "### {} [{:?}, {} hits]\n_{}_\n\n{}\n\n",
                 memory.name, memory.lifecycle, memory.hit_count, memory.description, memory.content

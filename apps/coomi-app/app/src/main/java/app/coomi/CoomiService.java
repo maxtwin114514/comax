@@ -482,6 +482,9 @@ public class CoomiService extends Service {
             mEngineProcess = builder.start();
             mEnginePort = port;
             mIsEngineRunning = true;
+            // DeepSeek 验证码登录依赖官方 librscrypto.so 求解 PoW：
+            // 引擎把 challenge 写进 ~/.coomi/control/pow/，这个服务轮询并用原生库求解。
+            CoomiPowService.start(this);
             startBundledRuntimeInstallWhenReady(mEngineProcess, port, token);
 
             Process process = mEngineProcess;

@@ -10,7 +10,7 @@ import { useSessionStore } from '@/stores/session'
 import { useConnectionStore } from '@/stores/connection'
 import { apiGet } from '@/bridge/http'
 import CoomiIcon from './CoomiIcon.vue'
-import { costWithPrice, fmtMoney, priceFor, type ModelPrice } from '@/utils/modelPrices'
+import { CNY_PER_USD, costWithPrice, fmtMoney, priceFor, type ModelPrice } from '@/utils/modelPrices'
 import CoomiMark from './CoomiMark.vue'
 import MorphBurger from './MorphBurger.vue'
 
@@ -211,7 +211,9 @@ function totals(records: BillingRecord[]): { amounts: Record<string,number>; unk
     const p = record.model===config.currentModel && record.provider_id===config.currentProviderId ? modelUnit.value : priceFor(record.model)
     const cost=costWithPrice(p,record.input_tokens,record.output_tokens,record.cached_input_tokens)
     if(cost==null||!p) {unknown++;continue}
-    amounts[p.currency]=(amounts[p.currency]??0)+cost
+    // 统一按人民币结算：USD 单价 × 汇率，其余币种原样保留。
+    const cny = p.currency === 'USD' ? cost*CNY_PER_USD : cost
+    amounts['CNY']=(amounts['CNY']??0)+cny
   }
   return {amounts,unknown}
 }
@@ -397,9 +399,20 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
 .usage-menu {
   position: absolute; z-index: 20; top: calc(var(--safe-top) + 49px); right: 8px;
   width: min(92vw, 390px); max-height: min(72vh, 560px); overflow-y: auto; padding: 12px 13px;
-  border: 1px solid var(--border); border-radius: var(--r-card);
+  /* 胶囊装竖向排列：顶部小圆角、主体大圆角，像从右上角挂下来的胶囊 */
+  border: 1px solid var(--border);
+  border-radius: 26px 26px 18px 18px;
   background: var(--bg); box-shadow: var(--shadow-2);
+  transform-origin: top right;
+  animation: capsule-drop .24s cubic-bezier(.22,.85,.3,1.1) both;
 }
+/* 胶囊展开动画：从右上角小点放大成胶囊，竖向展开 */
+@keyframes capsule-drop {
+  from { opacity: 0; transform: scale(.5) translateY(-12px); border-radius: 50% 50% 50% 50%; }
+  to { opacity: 1; transform: scale(1) translateY(0); border-radius: 26px 26px 18px 18px; }
+}
+[data-all-animations-off="true"] .usage-menu { animation: none; }
+@media (prefers-reduced-motion: reduce) { .usage-menu { animation: none; } }
 .usage-title { margin: 0 0 9px; font-size: 12px; font-weight: 650; color: var(--text-2); }
 .usage-stats { display: grid; gap: 8px; }
 .usage-stats div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

@@ -825,6 +825,8 @@ pub async fn serve(
             "/api/memory/{name}",
             put(update_memory).delete(delete_memory),
         )
+        .route("/api/notes", get(get_notes))
+        .route("/api/notes/{id}", get(get_note).put(put_note).delete(remove_note))
         .route("/api/providers", get(list_providers).post(upsert_provider))
         .route("/api/providers/{id}", delete(delete_provider))
         .route("/api/providers/{id}/activate", post(activate_provider))
@@ -4425,6 +4427,57 @@ async fn delete_memory(
     Ok(Json(json!({"ok": true, "deleted": deleted})))
 }
 
+// ── 个人笔记（NoteLibrary / 记忆库：与持久记忆隔离的私有文档） ──────────────
+
+/// 笔记列表（仅元数据，不含正文；正文属个人文档，不随记忆自动进入上下文）。
+async fn get_notes(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let notes = coomi_services::list_personal_notes(&state.home).map_err(ApiError::from)?;
+    Ok(Json(json!({"notes": notes})))
+}
+
+/// 读取单篇笔记（须由用户显式指定笔记 ID，Agent 不主动枚举）。
+async fn get_note(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (note, content) =
+        coomi_services::read_personal_note(&state.home, &id).map_err(ApiError::from)?;
+    Ok(Json(json!({"note": note, "content": content})))
+}
+
+/// 新建 / 更新笔记（带 revision 乐观锁，防止并发覆盖）。
+async fn put_note(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let title = body["title"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad_request("missing title"))?;
+    let content = body["content"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad_request("missing content"))?;
+    let revision = body["revision"]
+        .as_u64()
+        .ok_or_else(|| ApiError::bad_request("missing revision"))?;
+    let note = coomi_services::save_personal_note(&state.home, &id, title, content, revision)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({"note": note})))
+}
+
+/// 删除笔记（revision 校验）。
+async fn remove_note(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let revision = body["revision"]
+        .as_u64()
+        .ok_or_else(|| ApiError::bad_request("missing revision"))?;
+    coomi_services::delete_personal_note(&state.home, &id, revision).map_err(ApiError::from)?;
+    Ok(Json(json!({"ok": true})))
+}
+
 /// 并行拉取 registry.json 与两份统计；每份独立降级，互不影响。
 async fn fetch_registry_payload() -> (Option<Value>, Option<Value>, Option<Value>) {
     let registry_url = std::env::var("COOMI_REGISTRY_URL").ok();
@@ -7627,6 +7680,13 @@ async fn run_turn(
             prompt_context
                 .push_str("\n\nPersistent memory (core and frequently hit memories first):\n");
             prompt_context.push_str(&memory_context);
+            prompt_context.push_str(
+                "\n\nFor other memories, use memory_search / memory_read to query on demand — do not assume them.\n",
+            );
+        } else {
+            prompt_context.push_str(
+                "\n\nPersistent memory is enabled. Use memory_search to query relevant memories when needed.\n",
+            );
         }
     }
     let (sub_agents, fallback_sub_agent_id) = resolve_configured_subagents(&state.home, &registry);

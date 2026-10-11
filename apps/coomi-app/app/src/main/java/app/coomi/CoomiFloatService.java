@@ -497,6 +497,13 @@ public final class CoomiFloatService extends Service {
             setBackgroundColor(Color.TRANSPARENT);
             setClickable(false);
             setFocusable(false);
+            setEnabled(false);
+            setWillNotDraw(false);
+        }
+
+        @Override public boolean onTouchEvent(android.view.MotionEvent event) {
+            // 反馈层只是视觉提示，绝不消费触摸，全部穿透给目标 App。
+            return false;
         }
 
         void showTap(float x, float y) {
@@ -837,6 +844,10 @@ public final class CoomiFloatService extends Service {
 
     // ── 反馈触发（从 AccessibilityService 调用） ──────────────────────
 
-    public void showTapAt(float x, float y) { showTapFeedback(x, y); }
-    public void showSwipeFrom(float x1, float y1, float x2, float y2) { showSwipeFeedback(x1, y1, x2, y2); }
+    public void showTapAt(float x, float y) {
+        handler.post(() -> showTapFeedback(x, y));
+    }
+    public void showSwipeFrom(float x1, float y1, float x2, float y2) {
+        handler.post(() -> showSwipeFeedback(x1, y1, x2, y2));
+    }
 }

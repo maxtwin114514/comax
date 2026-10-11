@@ -17,8 +17,13 @@ export function costUsd(model: string, input: number, output: number, cached=0):
   const p=priceFor(model); return p?.currency === 'USD' ? costWithPrice(p,input,output,cached) : null
 }
 export const CNY_PER_USD=7.2 // Only a user-visible reference conversion, never balance accounting.
+/** 统一按人民币显示：美元单价 × 汇率，其他币种原样保留。 */
 export function costCny(model: string, input:number, output:number, cached=0):number|null {
-  const cost=costUsd(model,input,output,cached);return cost == null ? null : cost*CNY_PER_USD
+  const p=priceFor(model)
+  if (!p) return null
+  const usd = costWithPrice(p,input,output,cached)
+  if (usd == null) return null
+  return p.currency === 'USD' ? usd*CNY_PER_USD : usd
 }
 export function fmtMoney(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '未提供'
