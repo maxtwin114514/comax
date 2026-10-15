@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -24,10 +25,6 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.view.animation.AlphaAnimation;
-import android.view.animation.AnimationSet;
-import android.view.animation.ScaleAnimation;
-import android.view.animation.TranslateAnimation;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
@@ -66,13 +63,15 @@ public final class CoomiFloatService extends Service {
     private static volatile CoomiFloatService instance;
 
     private WindowManager windowManager;
-    private ViewGroup root;              // full-screen overlay root
+    private ViewGroup root;              // touchable ball/card window only
     private LinearLayout card;           // input + actions
     private TextView topStatus;          // single-line always-on-top status
     private TextView ballView;           // collapsed ball
     private EditText input;
     private FeedbackView feedback;
     private WindowManager.LayoutParams params;
+    private WindowManager.LayoutParams statusParams;
+    private WindowManager.LayoutParams feedbackParams;
 
     private boolean collapsed = true;    // start collapsed
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -109,7 +108,8 @@ public final class CoomiFloatService extends Service {
     private boolean dragging;
 
     public static boolean isRunning() {
-        return instance != null;
+        CoomiFloatService service = instance;
+        return service != null && service.root != null && service.root.isAttachedToWindow();
     }
 
     /** 追加一条思考/工具记录；服务没起就忽略（控制模式没开时不需要）。 */
@@ -135,7 +135,9 @@ public final class CoomiFloatService extends Service {
 
     public static void start(Context context) {
         if (context == null) return;
-        context.startService(new Intent(context, CoomiFloatService.class).setAction(ACTION_START));
+        Intent intent = new Intent(context, CoomiFloatService.class).setAction(ACTION_START);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent);
+        else context.startService(intent);
     }
 
     public static void stop(Context context) {
@@ -159,6 +161,9 @@ public final class CoomiFloatService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // START_STICKY can recreate the service with a null intent. Rebuild both
+        // windows instead of leaving a foreground service with no visible ball.
+        if (root == null) handler.post(this::buildOverlay);
         if (intent == null) return START_STICKY;
         String action = intent.getAction();
         if (ACTION_STOP.equals(action)) {
@@ -215,9 +220,14 @@ public final class CoomiFloatService extends Service {
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setOngoing(true)
                 .setContentIntent(pending);
-            startForeground(NOTIFICATION_ID, builder.build());
-        } catch (Throwable ignored) {
-            // 通知不可用不影响悬浮层；部分 ROM 会拦截前台服务。
+            Notification notification = builder.build();
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Throwable error) {
+            android.util.Log.e("CoomiFloat", "startForeground failed", error);
         }
     }
 
@@ -238,7 +248,7 @@ public final class CoomiFloatService extends Service {
         if (root != null) return;
         root = new FrameLayout(this);
         root.setLayoutParams(new ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.setBackgroundColor(Color.TRANSPARENT);
 
         // ── 顶部单行状态 ──
@@ -249,10 +259,8 @@ public final class CoomiFloatService extends Service {
         topStatus.setEllipsize(TextUtils.TruncateAt.END);
         topStatus.setPadding(dp(12), dp(6), dp(12), dp(6));
         topStatus.setBackgroundColor(0xCC2F6BD8);
-        FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
-        statusLp.gravity = Gravity.TOP;
-        root.addView(topStatus, statusLp);
+        // Status is its own NOT_TOUCHABLE window. Keeping it outside the ball/card
+        // window lets the target app receive touches everywhere else on screen.
 
         // ── 展开卡片：输入 + 快捷操作 ──
         card = new LinearLayout(this);
@@ -362,7 +370,8 @@ public final class CoomiFloatService extends Service {
         card.addView(actions);
 
         FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+            Math.min(getResources().getDisplayMetrics().widthPixels - dp(20), dp(380)),
+            FrameLayout.LayoutParams.WRAP_CONTENT);
         cardLp.gravity = Gravity.TOP | Gravity.START;
         root.addView(card, cardLp);
 
@@ -375,7 +384,6 @@ public final class CoomiFloatService extends Service {
         ballView.setBackground(rounded(0xFF2F6BD8, 24, 0xFFFFFFFF));
         ballView.setElevation(dp(8));
         ballView.setVisibility(View.VISIBLE);
-        ballView.setOnClickListener(v -> setCollapsedInternal(false));
         FrameLayout.LayoutParams ballLp = new FrameLayout.LayoutParams(dp(46), dp(46));
         ballLp.gravity = Gravity.TOP | Gravity.START;
         root.addView(ballView, ballLp);
@@ -388,11 +396,11 @@ public final class CoomiFloatService extends Service {
                     touchDownRawY = event.getRawY();
                     touchStartX = params.x;
                     touchStartY = params.y;
-                    return false;
+                    return true;
                 case MotionEvent.ACTION_MOVE: {
                     float dx = event.getRawX() - touchDownRawX;
                     float dy = event.getRawY() - touchDownRawY;
-                    if (!dragging && Math.hypot(dx, dy) < dp(6)) return false;
+                    if (!dragging && Math.hypot(dx, dy) < dp(6)) return true;
                     dragging = true;
                     params.x = Math.max(0, touchStartX + (int) dx);
                     params.y = Math.max(0, touchStartY + (int) dy);
@@ -401,10 +409,14 @@ public final class CoomiFloatService extends Service {
                     updateParams();
                     return true;
                 }
-                case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
+                    dragging = false;
+                    return true;
+                case MotionEvent.ACTION_UP:
                     if (dragging) { dragging = false; return true; }
-                    return false;
+                    v.performClick();
+                    setCollapsedInternal(false);
+                    return true;
                 default:
                     return false;
             }
@@ -463,9 +475,7 @@ public final class CoomiFloatService extends Service {
     private void showTapFeedback(float x, float y) {
         if (feedback == null) {
             feedback = new FeedbackView(this);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
-            root.addView(feedback, lp);
+            attachFeedbackWindow();
         }
         feedback.showTap(x, y);
         invalidateScreenCache();
@@ -474,9 +484,7 @@ public final class CoomiFloatService extends Service {
     private void showSwipeFeedback(float x1, float y1, float x2, float y2) {
         if (feedback == null) {
             feedback = new FeedbackView(this);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
-            root.addView(feedback, lp);
+            attachFeedbackWindow();
         }
         feedback.showSwipe(x1, y1, x2, y2);
     }
@@ -642,8 +650,8 @@ public final class CoomiFloatService extends Service {
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
             params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
                 type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -654,6 +662,20 @@ public final class CoomiFloatService extends Service {
         }
         try {
             if (root.getParent() == null) windowManager.addView(root, params);
+            if (topStatus != null && topStatus.getParent() == null) {
+                statusParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                    params.type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+                statusParams.gravity = Gravity.TOP;
+                // Android 12+ rejects touches through opaque application overlays,
+                // even with NOT_TOUCHABLE. Combined with feedback: .6 + .4 = .76.
+                statusParams.alpha = 0.6f;
+                windowManager.addView(topStatus, statusParams);
+            }
         } catch (Throwable ignored) {
             // 权限被回收或窗口被拒：静默失败，控制模式其余能力仍可用。
         }
@@ -671,12 +693,34 @@ public final class CoomiFloatService extends Service {
     private void detach() {
         if (root == null) return;
         try {
+            if (feedback != null && feedback.getParent() != null) windowManager.removeView(feedback);
+            if (topStatus != null && topStatus.getParent() != null) windowManager.removeView(topStatus);
             if (root.getParent() != null) windowManager.removeView(root);
         } catch (Throwable ignored) {
             // 忽略
         }
         root = null;
         params = null;
+        statusParams = null;
+        feedbackParams = null;
+    }
+
+    private void attachFeedbackWindow() {
+        if (feedback == null || windowManager == null || feedback.getParent() != null) return;
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            : WindowManager.LayoutParams.TYPE_PHONE;
+        feedbackParams = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT);
+        feedbackParams.gravity = Gravity.TOP | Gravity.START;
+        feedbackParams.alpha = 0.4f;
+        try { windowManager.addView(feedback, feedbackParams); }
+        catch (Throwable error) { android.util.Log.w("CoomiFloat", "feedback overlay failed", error); }
     }
 
     /**
@@ -694,6 +738,10 @@ public final class CoomiFloatService extends Service {
 
     private void applyCollapsedState(boolean animate) {
         boolean value = collapsed;
+        card.animate().setListener(null).cancel();
+        ballView.animate().setListener(null).cancel();
+        card.clearAnimation();
+        ballView.clearAnimation();
         if (params != null) {
             if (value) {
                 params.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
@@ -708,6 +756,13 @@ public final class CoomiFloatService extends Service {
                 params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE;
             }
+            params.width = value ? dp(46)
+                : Math.min(getResources().getDisplayMetrics().widthPixels - dp(20), dp(380));
+            params.height = value ? dp(46) : WindowManager.LayoutParams.WRAP_CONTENT;
+            int screenWidth = getResources().getDisplayMetrics().widthPixels;
+            int screenHeight = getResources().getDisplayMetrics().heightPixels;
+            params.x = Math.max(0, Math.min(params.x, screenWidth - params.width));
+            params.y = Math.max(dp(32), Math.min(params.y, screenHeight - (value ? dp(46) : dp(180))));
             updateParams();
         }
 
@@ -735,27 +790,12 @@ public final class CoomiFloatService extends Service {
             ballView.setScaleX(1f);
             ballView.setScaleY(1f);
 
-            AnimationSet cardAnim = new AnimationSet(true);
-            cardAnim.setDuration(ANIM_DURATION_MS);
-            cardAnim.addAnimation(new AlphaAnimation(0f, 1f));
-            cardAnim.addAnimation(new ScaleAnimation(0.7f, 1f, 0.7f, 1f,
-                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
-            cardAnim.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
-                @Override public void onAnimationStart(android.view.animation.Animation a) {}
-                @Override public void onAnimationRepeat(android.view.animation.Animation a) {}
-                @Override public void onAnimationEnd(android.view.animation.Animation a) {
-                    ballView.setVisibility(View.GONE);
-                    focusInput();
-                }
-            });
-            card.startAnimation(cardAnim);
-
-            AnimationSet ballAnim = new AnimationSet(true);
-            ballAnim.setDuration(ANIM_DURATION_MS);
-            ballAnim.addAnimation(new AlphaAnimation(1f, 0f));
-            ballAnim.addAnimation(new ScaleAnimation(1f, 0.1f, 1f, 0.1f,
-                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
-            ballView.startAnimation(ballAnim);
+            card.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                .setDuration(ANIM_DURATION_MS).withEndAction(() -> {
+                    if (!collapsed) { ballView.setVisibility(View.GONE); focusInput(); }
+                }).start();
+            ballView.animate().alpha(0f).scaleX(0.1f).scaleY(0.1f)
+                .setDuration(ANIM_DURATION_MS).start();
         } else {
             // 收起动画：卡片缩小淡出；球放大淡入
             card.setVisibility(View.VISIBLE);
@@ -767,26 +807,12 @@ public final class CoomiFloatService extends Service {
             ballView.setScaleX(0.1f);
             ballView.setScaleY(0.1f);
 
-            AnimationSet cardAnim = new AnimationSet(true);
-            cardAnim.setDuration(ANIM_DURATION_MS);
-            cardAnim.addAnimation(new AlphaAnimation(1f, 0f));
-            cardAnim.addAnimation(new ScaleAnimation(1f, 0.7f, 1f, 0.7f,
-                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
-            cardAnim.setAnimationListener(new android.view.animation.Animation.AnimationListener() {
-                @Override public void onAnimationStart(android.view.animation.Animation a) {}
-                @Override public void onAnimationRepeat(android.view.animation.Animation a) {}
-                @Override public void onAnimationEnd(android.view.animation.Animation a) {
-                    card.setVisibility(View.GONE);
-                }
-            });
-            card.startAnimation(cardAnim);
-
-            AnimationSet ballAnim = new AnimationSet(true);
-            ballAnim.setDuration(ANIM_DURATION_MS);
-            ballAnim.addAnimation(new AlphaAnimation(0f, 1f));
-            ballAnim.addAnimation(new ScaleAnimation(0.1f, 1f, 0.1f, 1f,
-                ScaleAnimation.RELATIVE_TO_SELF, 0.5f, ScaleAnimation.RELATIVE_TO_SELF, 0.5f));
-            ballView.startAnimation(ballAnim);
+            card.animate().alpha(0f).scaleX(0.7f).scaleY(0.7f)
+                .setDuration(ANIM_DURATION_MS).withEndAction(() -> {
+                    if (collapsed) card.setVisibility(View.GONE);
+                }).start();
+            ballView.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                .setDuration(ANIM_DURATION_MS).start();
         }
     }
 

@@ -67,16 +67,16 @@ const miniLabel = computed(() => {
         <CoomiIcon name="chevronRight" :size="14" class="gchev" :class="{ open }" />
       </button>
 
-      <Transition name="tg-collapse" mode="out-in">
-        <div v-if="!open" key="peek" class="peek">
+      <div class="group-content" :class="{ open }">
+        <div class="peek">
           <code v-for="c in cards.slice(0, 3)" :key="c.callId" class="pchip">{{ c.toolName }}</code>
           <span v-if="cards.length > 3" class="pmore">+{{ cards.length - 3 }}</span>
         </div>
 
-        <div v-else key="glist" class="glist">
+        <div class="glist">
           <ToolCardItem v-for="c in cards" :key="c.callId" :card="c" />
         </div>
-      </Transition>
+      </div>
     </template>
   </div>
 </template>
@@ -114,7 +114,10 @@ const miniLabel = computed(() => {
 .gchev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
 .gchev.open { transform: rotate(90deg); }
 
-.peek { display: flex; align-items: center; gap: 5px; padding: 0 11px 10px; }
+.group-content { display:grid; overflow:hidden; }
+.group-content > * { grid-area:1 / 1; min-width:0; }
+.peek { display:flex; align-items:center; gap:5px; padding:0 11px 10px; opacity:1; transition:opacity .14s ease; }
+.group-content.open .peek { opacity:0; pointer-events:none; }
 .pchip {
   padding: 2px 8px; border-radius: var(--r-pill);
   background: var(--bg); border: 1px solid var(--border);
@@ -122,7 +125,13 @@ const miniLabel = computed(() => {
 }
 .pmore { font-size: 11px; color: var(--text-3); }
 
-.glist { display: flex; flex-direction: column; gap: 7px; padding: 0 7px 8px; }
+.glist {
+  display:flex; flex-direction:column; gap:7px; padding:0 7px;
+  max-height:0; opacity:0; transform:translateY(-4px); overflow:hidden;
+  pointer-events:none; will-change:max-height,opacity,transform;
+  transition:max-height .28s cubic-bezier(.22,.68,.19,1), opacity .18s ease, transform .22s ease, padding-bottom .22s ease;
+}
+.group-content.open .glist { max-height:4800px; padding-bottom:8px; opacity:1; transform:none; pointer-events:auto; }
 
 /* ── 极简界面模式：工具调用折叠成一小块方框 ── */
 .mini-tool {
@@ -163,10 +172,6 @@ const miniLabel = computed(() => {
 .tg-collapse-leave-to {
   opacity: 0;
   transform: translateY(4px);
-}
-.tg-collapse-leave-active {
-  position: absolute;
-  width: 100%;
 }
 </style>
 

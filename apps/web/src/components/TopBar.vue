@@ -404,12 +404,13 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
   border-radius: 26px 26px 18px 18px;
   background: var(--bg); box-shadow: var(--shadow-2);
   transform-origin: top right;
-  animation: capsule-drop .24s cubic-bezier(.22,.85,.3,1.1) both;
+  animation: capsule-drop .2s cubic-bezier(.22,.68,.19,1) both;
+  will-change: transform, opacity;
 }
 /* 胶囊展开动画：从右上角小点放大成胶囊，竖向展开 */
 @keyframes capsule-drop {
-  from { opacity: 0; transform: scale(.5) translateY(-12px); border-radius: 50% 50% 50% 50%; }
-  to { opacity: 1; transform: scale(1) translateY(0); border-radius: 26px 26px 18px 18px; }
+  from { opacity:0; transform:translate3d(0,-7px,0) scale(.96,.88); }
+  to { opacity:1; transform:translate3d(0,0,0) scale(1); }
 }
 [data-all-animations-off="true"] .usage-menu { animation: none; }
 @media (prefers-reduced-motion: reduce) { .usage-menu { animation: none; } }
@@ -533,7 +534,7 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
 .center:active { background: var(--fill); }
 .session-brand { flex-shrink:0; }
 .session-brand.enter { animation: session-brand-enter 1.1s cubic-bezier(.12,.8,.22,1) both; }
-.session-brand.spinning { animation:session-brand-spin 1s cubic-bezier(.62,.02,.2,.92) infinite; }
+.session-brand.spinning { animation:session-brand-spin 1s cubic-bezier(.62,.02,.2,.92) infinite; will-change:transform; }
 .session-brand.settling { animation:session-brand-settle 1s cubic-bezier(.2,.8,.2,1) both; }
 .life-orbit { position: relative; display: inline-grid; place-items: center; width: 20px; height: 20px; margin: 0 3px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; flex-shrink: 0; }
 .orbit { position: absolute; inset: 2px; border-radius: 50%; }
@@ -543,10 +544,10 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
 @keyframes topbar-life-spin-reverse { to { transform: rotate(-360deg); } }
 @media (prefers-reduced-motion: reduce) { .orbit.outer, .orbit.inner { animation-duration: 6s; } }
 @keyframes session-brand-enter {
-  0% { transform:translateX(-46vw) scale(3.2) rotate(0deg); opacity:0; }
+  0% { transform:translate3d(-46vw,0,0) scale(3.2) rotate(0deg); opacity:0; }
   18% { opacity:1; }
-  62% { transform:translateX(-4vw) scale(1.15) rotate(300deg); }
-  100% { transform:translateX(0) scale(1) rotate(360deg); opacity:1; }
+  62% { transform:translate3d(-4vw,0,0) scale(1.15) rotate(300deg); }
+  100% { transform:translate3d(0,0,0) scale(1) rotate(360deg); opacity:1; }
 }
 @keyframes session-brand-spin { 0% { transform:rotate(0deg); } 72% { transform:rotate(300deg); } 100% { transform:rotate(360deg); } }
 @keyframes session-brand-settle { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }

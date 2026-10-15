@@ -13,6 +13,7 @@ use coomi_engine::ModelProvider;
 use coomi_engine::ModelRequest;
 use coomi_engine::ModelResponse;
 use coomi_engine::ModelStreamObserver;
+use coomi_engine::normalize_history;
 use coomi_engine::ProviderErrorKind;
 use coomi_engine::ProviderRequestError;
 use coomi_engine::Role;
@@ -1801,7 +1802,8 @@ fn stream_event_error(phase: &'static str, value: &Value) -> anyhow::Error {
 
 fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Vec<Value>> {
     let mut output = Vec::new();
-    for message in messages {
+    let normalized = normalize_history(messages);
+    for message in &normalized {
         if !message.provider_items.is_empty() {
             continue;
         }
@@ -1871,7 +1873,8 @@ fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Ve
 
 fn responses_input(messages: &[ChatMessage], supports_vision: bool) -> Result<Vec<Value>> {
     let mut input = Vec::new();
-    for message in messages {
+    let normalized = normalize_history(messages);
+    for message in &normalized {
         if !message.provider_items.is_empty() {
             input.extend(message.provider_items.iter().cloned());
             continue;
@@ -1949,7 +1952,8 @@ fn anthropic_messages(
 ) -> Result<(String, Vec<Value>)> {
     let mut system = Vec::new();
     let mut output = Vec::new();
-    for message in messages {
+    let normalized = normalize_history(messages);
+    for message in &normalized {
         if !message.provider_items.is_empty() {
             continue;
         }
@@ -2549,6 +2553,28 @@ mod tests {
             rendered[0].pointer("/tool_calls/0/function/name"),
             Some(&Value::String("read_file".into()))
         );
+    }
+
+    #[test]
+    fn repairs_interrupted_tool_history_before_deepseek_request() {
+        let messages = vec![
+            ChatMessage::assistant(
+                "",
+                vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path":"README.md"}),
+                }],
+            ),
+            ChatMessage::internal_user("工具正在处理"),
+            ChatMessage::user("下一条任务"),
+        ];
+        let rendered = openai_messages(&messages, false).expect("render messages");
+        assert_eq!(rendered[0]["role"], "assistant");
+        assert_eq!(rendered[1]["role"], "tool");
+        assert_eq!(rendered[1]["tool_call_id"], "call-1");
+        assert_eq!(rendered[2]["role"], "user");
+        assert_eq!(rendered[2]["content"], "下一条任务");
     }
 
     #[test]

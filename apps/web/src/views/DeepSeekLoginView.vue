@@ -21,11 +21,41 @@ const message = ref('')
 const error = ref('')
 const loggedUser = ref<{ id: string; username: string; email?: string; mobile?: string } | null>(null)
 const isLogged = ref(false)
+const adminAuthorized = ref(false)
+const adminPassword = ref('')
+const checkingAdmin = ref(false)
+const ADMIN_SESSION_KEY = 'coomi.deepseek.admin.session'
 const selectedModel = ref<'deepseek-chat'>('deepseek-chat')
 const thinkingEnabled = ref(true)
 const searchEnabled = ref(false)
 let countdownTimer: ReturnType<typeof setInterval> | null = null
-const DEEPSEEK_BASE = 'https://chat.deepseek.com'
+function savedAdminSession(): string {
+  try { return sessionStorage.getItem(ADMIN_SESSION_KEY) ?? '' } catch { return '' }
+}
+
+async function authorizeAdmin() {
+  if (checkingAdmin.value) return
+  checkingAdmin.value = true; error.value = ''
+  try {
+    const verified = await apiSend<{ adminSession: string }>('/api/admin/verify', 'POST', { adminPassword: adminPassword.value })
+    adminAuthorized.value = true
+    try { sessionStorage.setItem(ADMIN_SESSION_KEY, verified.adminSession) } catch { /* 当前页面仍可用 */ }
+    adminPassword.value = ''
+    await checkStatus()
+  } catch (cause) { error.value = `管理员验证失败：${String(cause)}` }
+  finally { checkingAdmin.value = false }
+}
+
+async function ensureAdmin(): Promise<boolean> {
+  if (adminAuthorized.value) return true
+  const saved = savedAdminSession()
+  if (!saved) { error.value = '请先完成管理员验证'; return false }
+  try {
+    await apiSend('/api/admin/verify', 'POST', { adminSession: saved })
+    adminAuthorized.value = true
+    return true
+  } catch { error.value = '管理员验证已失效，请重新验证'; return false }
+}
 
 interface LoginResp {
   user?: { id: string; username: string; email?: string; mobile?: string }
@@ -41,7 +71,10 @@ async function checkStatus() {
   } catch { /* 引擎启动中时保持未登录 */ }
 }
 
-onMounted(() => { void checkStatus() })
+onMounted(() => {
+  const saved = savedAdminSession()
+  if (saved) { void ensureAdmin() }
+})
 onBeforeUnmount(() => { if (countdownTimer) clearInterval(countdownTimer) })
 
 function startCountdown() {
@@ -65,6 +98,7 @@ async function installProvider(resp: LoginResp, fallbackName: string) {
     model: selectedModel.value,
     thinkingEnabled: thinkingEnabled.value,
     searchEnabled: searchEnabled.value,
+    adminSession: savedAdminSession(),
   })
   if (!ok) throw new Error('Provider 保存失败')
   await config.fetchProviders()
@@ -75,13 +109,14 @@ async function installProvider(resp: LoginResp, fallbackName: string) {
 }
 
 async function switchModel() {
-  if (!isLogged.value) return
+  if (!isLogged.value || !(await ensureAdmin())) return
   error.value = ''
   try {
     const ok = await apiSend<{ model: string }>('/api/deepseek/model', 'POST', {
       model: selectedModel.value,
       thinkingEnabled: thinkingEnabled.value,
       searchEnabled: searchEnabled.value,
+      adminSession: savedAdminSession(),
     })
     if (!ok) throw new Error('模型切换失败')
     await config.fetchProviders()
@@ -98,7 +133,7 @@ async function passwordLogin() {
   logging.value = true; error.value = ''; message.value = ''
   try {
     const resp = await apiSend<LoginResp>('/api/deepseek/login', 'POST', {
-      account: account.value.trim(), password: password.value,
+      account: account.value.trim(), password: password.value, adminSession: savedAdminSession(),
     })
     await installProvider(resp, account.value.trim())
   } catch (e) { error.value = '登录失败：' + String(e) }
@@ -111,7 +146,7 @@ async function sendCode() {
   if (!number) { error.value = '请输入手机号'; return }
   sendingCode.value = true; error.value = ''; message.value = ''
   try {
-    await apiSend('/api/deepseek/sms/send', 'POST', { mobile: number, areaCode: areaCode.value })
+    await apiSend('/api/deepseek/sms/send', 'POST', { mobile: number, areaCode: areaCode.value, adminSession: savedAdminSession() })
     message.value = '验证码已发送'
     startCountdown()
   } catch (e) { error.value = '发送失败：' + String(e) }
@@ -125,7 +160,7 @@ async function smsLogin() {
   logging.value = true; error.value = ''; message.value = ''
   try {
     const resp = await apiSend<LoginResp>('/api/deepseek/sms/login', 'POST', {
-      mobile: number, areaCode: areaCode.value, code: code.value.trim(),
+      mobile: number, areaCode: areaCode.value, code: code.value.trim(), adminSession: savedAdminSession(),
     })
     await installProvider(resp, `${areaCode.value}${number}`)
   } catch (e) { error.value = '登录失败：' + String(e) }
@@ -133,7 +168,7 @@ async function smsLogin() {
 }
 
 async function logout() {
-  try { await apiSend('/api/deepseek/logout', 'POST') } catch { /* ignore */ }
+  try { await apiSend('/api/deepseek/logout', 'POST', { adminSession: savedAdminSession() }) } catch { /* ignore */ }
   await config.fetchProviders()
   isLogged.value = false; loggedUser.value = null; message.value = '已退出登录'
 }
@@ -143,10 +178,18 @@ function backToProviders() { router.push('/providers') }
 
 <template>
   <div class="page">
-    <PageHead title="DeepSeek 账号·预览" @back="backToProviders" />
+    <PageHead title="DeepSeek 账号" @back="backToProviders" />
     <main class="body ds-login">
       <p v-if="message" class="notice ok">{{ message }}</p>
       <p v-if="error" class="notice err">{{ error }}</p>
+      <section v-if="!adminAuthorized" class="card admin-gate">
+        <CoomiIcon name="shield" :size="24" />
+        <h2>管理员验证</h2>
+        <p>输入管理员密码后，才能使用 DeepSeek 账号登录。</p>
+        <label class="field"><span>管理员密码</span><input v-model="adminPassword" type="password" autocomplete="current-password" @keyup.enter="authorizeAdmin" /></label>
+        <button class="btn primary" :disabled="checkingAdmin || !adminPassword" @click="authorizeAdmin">{{ checkingAdmin ? '验证中…' : '验证并继续' }}</button>
+      </section>
+      <template v-else>
       <div class="ds-hero">
         <CoomiIcon name="sparkle" :size="28" />
         <h2>DeepSeek 登录</h2>
@@ -195,12 +238,14 @@ function backToProviders() { router.push('/providers') }
           <p class="hint">短信发送若触发 DeepSeek 安全验证，会显示对应错误信息。</p>
         </template>
       </section>
+      </template>
     </main>
   </div>
 </template>
 
 <style scoped>
 .model-selector{display:flex;align-items:center;gap:12px;padding:12px 16px;margin-bottom:12px}
+.admin-gate{max-width:420px;margin:40px auto;text-align:center}.admin-gate h2{margin:10px 0 4px}.admin-gate>p{margin:0 0 18px;color:var(--text-3);font-size:12.5px}.admin-gate .field{text-align:left}
 .ms-label{font-size:12px;color:var(--text-2);font-weight:600;flex-shrink:0}
 .ms-tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:3px;border-radius:10px;background:var(--fill);flex:1}
 .ms-tabs button{height:32px;border:0;border-radius:8px;background:transparent;color:var(--text-3);font-size:12px;font-weight:600;transition:all .15s}

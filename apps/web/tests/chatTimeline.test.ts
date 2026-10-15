@@ -98,8 +98,31 @@ test('chat templates retain dynamic measurement and lazy image contracts', async
   assert.match(chat, /<DynamicScroller\b/)
   assert.match(chat, /<DynamicScrollerItem\b/)
   assert.match(chat, /key-field="key"/)
-  assert.match(chat, /:size-dependencies=/)
-  assert.match(chat, /ResizeObserver/)
+  assert.match(chat, /:emit-resize="true"/)
+  assert.match(chat, /@resize="follow"/)
+  assert.doesNotMatch(chat, /page-mode/)
+  // 空态必须与虚拟列表互斥：RecycleScroller 的 empty 插槽是无条件渲染的，
+  // 一旦写进滚动内容就会把空态格言一直顶在对话上方（1.5.2o4beta 回归点）。
+  assert.match(chat, /v-if="blocks\.length > 0"/)
+  assert.match(chat, /v-if="blocks\.length === 0" class="stream"/)
+  assert.doesNotMatch(chat, /template #empty/)
   assert.match(toolCard, /loading="lazy"\s+decoding="async"/)
   assert.match(fileInline, /loading="lazy"\s+decoding="async"/)
+})
+
+test('every slash command in the composer has a click-to-run action', async () => {
+  const composer = await readFile(new URL('../src/components/Composer.vue', import.meta.url), 'utf8')
+  const listed = [...composer.matchAll(/\{ name: '(\/[a-z_]+)', desc:/g)].map(match => match[1])
+  assert.ok(listed.length >= 7, `expected the slash-command list, got ${listed.length}`)
+
+  const runners = composer.slice(composer.indexOf('const COMMAND_RUNNERS'))
+  for (const name of listed) {
+    assert.ok(
+      runners.includes(`'${name}':`),
+      `${name} 必须有点击即执行的实现（COMMAND_RUNNERS）`,
+    )
+  }
+  // 确认弹窗必须是唯一的执行入口，不能退回「填进输入框让用户自己发」。
+  assert.match(composer, /@click="requestCommand\(c\)"/)
+  assert.doesNotMatch(composer, /class="compact-confirm"/)
 })

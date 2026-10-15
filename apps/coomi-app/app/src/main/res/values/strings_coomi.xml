@@ -248,6 +248,15 @@
     <string name="coomi_assistant_autostart_missing">建议加入系统自启动白名单</string>
     <string name="coomi_assistant_engine_ready">本地引擎已连接</string>
     <string name="coomi_assistant_engine_missing">打开 Comax 后会自动启动</string>
+    <string name="coomi_assistant_role_granted">已设为系统默认助理</string>
+    <string name="coomi_assistant_role_not_yet">尚未设为默认助理，请在系统设置中选择 Comax</string>
+    <string name="coomi_assistant_role_manual">请在系统设置中将 Comax 设为默认助手</string>
+    <string name="coomi_assistant_role_unsupported">当前系统不支持设置默认助手</string>
+    <string name="coomi_assistant_role_failed">无法打开默认助手设置</string>
+    <string name="coomi_assistant_mic_granted">麦克风权限已开启</string>
+    <string name="coomi_assistant_mic_denied">麦克风权限被拒绝</string>
+    <string name="coomi_assistant_mic_blocked">麦克风权限已被禁用，请在系统设置中手动开启</string>
+    <string name="coomi_assistant_overlay_failed">无法打开悬浮窗权限设置</string>
 
     <!-- ===== WebView 闪屏 ===== -->
     <string name="coomi_splash_hint">正在连接本机引擎…</string>

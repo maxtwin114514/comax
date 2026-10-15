@@ -35,6 +35,7 @@ import app.coomi.CoomiTheme;
 public final class CoomiAssistantSetupActivity extends Activity {
     private static final int REQUEST_MIC = 4101;
     private static final int REQUEST_ROLE = 4102;
+    private static final int REQUEST_OVERLAY = 4103;
     private static final String LAUNCHER_PREFS = "coomi_launcher";
 
     private AssistantSettingsStore store;
@@ -103,6 +104,43 @@ public final class CoomiAssistantSetupActivity extends Activity {
         refreshStatus();
     }
 
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_ROLE) {
+            // Return from system assistant picker: refresh UI regardless of outcome
+            refreshStatus();
+            if (isAssistantRoleHeld()) {
+                Toast.makeText(this, R.string.coomi_assistant_role_granted, Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, R.string.coomi_assistant_role_not_yet, Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        if (requestCode == REQUEST_OVERLAY) {
+            refreshStatus();
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_MIC) {
+            refreshStatus();
+            if (hasMic()) {
+                Toast.makeText(this, R.string.coomi_assistant_mic_granted, Toast.LENGTH_SHORT).show();
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+                // "Don't ask again" chosen or permanently denied: direct to settings
+                Toast.makeText(this, R.string.coomi_assistant_mic_blocked, Toast.LENGTH_LONG).show();
+                try {
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())));
+                } catch (Exception ignored) { /* best-effort */ }
+            } else {
+                Toast.makeText(this, R.string.coomi_assistant_mic_denied, Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
     private void loadModels() {
         providers = store.configuredProviders();
         ArrayList<String> labels = new ArrayList<>();
@@ -153,7 +191,9 @@ public final class CoomiAssistantSetupActivity extends Activity {
 
     private void requestMic() {
         if (hasMic()) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MIC);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MIC);
+        }
     }
 
     private boolean isAssistantRoleHeld() {
@@ -168,26 +208,58 @@ public final class CoomiAssistantSetupActivity extends Activity {
     }
 
     private void requestAssistantRole() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                RoleManager roles = getSystemService(RoleManager.class);
-                if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
-                    startActivityForResult(roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), REQUEST_ROLE);
-                    return;
-                }
+        Intent intent = null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            RoleManager roles = getSystemService(RoleManager.class);
+            if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
+                try { intent = roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT); }
+                catch (Exception ignored) { intent = null; }
             }
-            startActivity(new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS));
-        } catch (Exception error) {
-            startActivity(new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS));
         }
+        if (intent != null) {
+            try {
+                startActivityForResult(intent, REQUEST_ROLE);
+                return;
+            } catch (Exception ignored) { /* fall through to fallback */ }
+        }
+
+        // Fallback 1: system voice-input / assistant settings
+        Intent fallback = new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS);
+        if (fallback.resolveActivity(getPackageManager()) != null) {
+            try {
+                startActivityForResult(fallback, REQUEST_ROLE);
+                Toast.makeText(this, R.string.coomi_assistant_role_manual, Toast.LENGTH_LONG).show();
+                return;
+            } catch (Exception ignored) { /* fall through */ }
+        }
+
+        // Fallback 2: generic default-apps settings
+        Intent manage = new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS);
+        if (manage.resolveActivity(getPackageManager()) != null) {
+            try {
+                startActivityForResult(manage, REQUEST_ROLE);
+                Toast.makeText(this, R.string.coomi_assistant_role_manual, Toast.LENGTH_LONG).show();
+                return;
+            } catch (Exception ignored) { /* fall through */ }
+        }
+
+        Toast.makeText(this, R.string.coomi_assistant_role_unsupported, Toast.LENGTH_LONG).show();
     }
 
     private void openOverlaySettings() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) return;
         try {
-            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+            Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+            startActivityForResult(intent, REQUEST_OVERLAY);
         } catch (Exception ignored) {
-            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+            Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName()));
+            if (details.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(details, REQUEST_OVERLAY);
+            } else {
+                Toast.makeText(this, R.string.coomi_assistant_overlay_failed, Toast.LENGTH_LONG).show();
+            }
         }
     }
 

@@ -167,6 +167,8 @@ struct AppState {
     studio_runs: Arc<StdMutex<HashMap<String, AbortHandle>>>,
     /// 工作室任务事件缓存，断开或重进后可补发最近状态。
     studio_events: Arc<StdMutex<HashMap<String, Vec<Value>>>>,
+    /// 动态工作流引擎（M1）：门面注入 + journal/回放 + 子代理会话。
+    dynamic_workflows: Arc<crate::dynwork::DynamicWorkflows>,
     /// 参考包迁入：群聊房间与协同任务的后台执行句柄。
     group_chat_runs: Arc<StdMutex<HashMap<String, AbortHandle>>>,
     collab_runs: Arc<StdMutex<HashMap<String, AbortHandle>>>,
@@ -316,6 +318,17 @@ struct SessionTask {
     file_requests: StdMutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
     next_event_seq: AtomicU64,
     unacked_events: StdMutex<VecDeque<Value>>,
+    /// UI recovery is independent of ACK delivery and the on-disk model history.
+    /// Keep the pre-turn base plus current-turn events, including streamed text
+    /// and pending approvals which may not have been committed to SessionStore.
+    view_checkpoint: StdMutex<ViewCheckpoint>,
+}
+
+#[derive(Default)]
+struct ViewCheckpoint {
+    base: Option<Value>,
+    events: Vec<Value>,
+    event_seq: u64,
 }
 
 #[derive(Clone)]
@@ -345,6 +358,7 @@ impl SessionTask {
             file_requests: StdMutex::new(HashMap::new()),
             next_event_seq: AtomicU64::new(1),
             unacked_events: StdMutex::new(VecDeque::new()),
+            view_checkpoint: StdMutex::new(ViewCheckpoint::default()),
         }
     }
 
@@ -371,10 +385,43 @@ impl SessionTask {
         }
     }
 
+    /// 会话落盘后推进视图基准。
+    ///
+    /// 基准必须跟着落盘会话一起前移：用户消息是在 run_turn 内部才写进 session 的，
+    /// 如果基准一直停在 begin_managed_task 那一刻（早于用户消息），重进会话时
+    /// 「快照 = 基准 + 事件」就会丢掉上一轮提问 —— 事件流里没有用户消息这一项。
+    /// 同时把已经体现在消息里的事件从增量中剔除，避免同一段文本被复原两次。
+    fn advance_view_checkpoint(&self, base: Value) {
+        let watermark = self.next_event_seq.load(Ordering::SeqCst).saturating_sub(1);
+        let mut view = self.view_checkpoint.lock().unwrap_or_else(|p| p.into_inner());
+        view.base = Some(base);
+        view.event_seq = watermark;
+        view.events
+            .retain(|event| event["event_seq"].as_u64().unwrap_or(0) > watermark);
+    }
+
     /// 事件出口：分配稳定序号并保留到客户端确认，同时推送给当前活跃连接。
     fn push_event(&self, mut payload: Value) {
         let seq = self.next_event_seq.fetch_add(1, Ordering::SeqCst);
         payload["event_seq"] = json!(seq);
+        {
+            let mut view = self.view_checkpoint.lock().unwrap_or_else(|p| p.into_inner());
+            let kind = payload["event_type"].as_str().unwrap_or_default();
+            // Coalesce adjacent deltas only. Boundaries (tools, reset, end) retain
+            // ordering so recovery reproduces exactly the same timeline.
+            let merged = matches!(kind, "text_chunk" | "reasoning_chunk")
+                && view.events.last().is_some_and(|event| event["event_type"] == payload["event_type"]);
+            if merged {
+                if let Some(last) = view.events.last_mut() {
+                    let text = format!("{}{}", last["content"].as_str().unwrap_or_default(), payload["content"].as_str().unwrap_or_default());
+                    last["content"] = json!(text);
+                    last["event_seq"] = json!(seq);
+                }
+            } else {
+                view.events.push(payload.clone());
+            }
+            view.event_seq = seq;
+        }
         let mut queue = self
             .unacked_events
             .lock()
@@ -483,6 +530,13 @@ fn begin_managed_task(
         let _ = state.task_manager.set_baseline(&record.id, baseline);
     }
     task.begin_turn(record.id);
+    let base = Uuid::parse_str(session_id).ok()
+        .and_then(|id| SessionStore::new(&state.home).load(id).ok())
+        .and_then(|session| serde_json::to_value(session).ok())
+        .unwrap_or_else(|| json!({"messages": [], "archive": [], "cwd": state.cwd, "usage": {}}));
+    *task.view_checkpoint.lock().unwrap_or_else(|p| p.into_inner()) = ViewCheckpoint {
+        base: Some(base), events: Vec::new(), event_seq: task.next_event_seq.load(Ordering::SeqCst).saturating_sub(1),
+    };
     Ok(())
 }
 
@@ -649,7 +703,7 @@ fn engine_fingerprint() -> Result<String> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PermissionMode {
+pub(crate) enum PermissionMode {
     Ask,
     Auto,
     Full,
@@ -768,6 +822,7 @@ pub async fn serve(
     let configured_task_limit = configured_connection_settings(&home).max_concurrent_tasks;
     let workflow_scheduler = crate::workflow::WorkflowScheduler::new(&home.clone());
     let mcp_runtime = Arc::new(McpRuntime::load(&home).await);
+    let dynamic_workflows = Arc::new(crate::dynwork::DynamicWorkflows::new(&home));
     let state = AppState {
         home,
         cwd,
@@ -784,6 +839,7 @@ pub async fn serve(
         studio_approvals: Arc::new(StdMutex::new(HashMap::new())),
         studio_runs: Arc::new(StdMutex::new(HashMap::new())),
         studio_events: Arc::new(StdMutex::new(HashMap::new())),
+        dynamic_workflows,
         group_chat_runs: Arc::new(StdMutex::new(HashMap::new())),
         collab_runs: Arc::new(StdMutex::new(HashMap::new())),
     };
@@ -936,6 +992,26 @@ pub async fn serve(
             get(life_settings_get).put(life_settings_put),
         )
         .route("/api/deepseek/login", post(deepseek_login_handler))
+        .route("/api/admin/verify", post(admin_verify_handler))
+        .route(
+            "/api/dynamic-workflows",
+            get(dynwork_list).post(dynwork_save),
+        )
+        .route(
+            "/api/dynamic-workflows/{id}",
+            get(dynwork_get).delete(dynwork_delete),
+        )
+        .route("/api/dynamic-workflows/{id}/plan", post(dynwork_plan))
+        .route("/api/dynamic-workflows/{id}/run", post(dynwork_run))
+        .route("/api/dynamic-workflows/runs/{run}", get(dynwork_run_get))
+        .route(
+            "/api/dynamic-workflows/runs/{run}/events",
+            get(dynwork_run_events),
+        )
+        .route(
+            "/api/dynamic-workflows/runs/{run}/stop",
+            post(dynwork_run_stop),
+        )
         .route("/api/deepseek/sms/send", post(deepseek_sms_send_handler))
         .route("/api/deepseek/sms/login", post(deepseek_sms_login_handler))
         .route("/api/deepseek/status", get(deepseek_status_handler))
@@ -1575,6 +1651,76 @@ async fn set_global_memory(
 }
 
 // ========== DeepSeek 账号登录 ==========
+const DEEPSEEK_ADMIN_PASSWORD_SHA256: &str = "044839df6397d07e3a784ed2d9ebbc158c55c994468d9e938635879f0ba474d6";
+const DEEPSEEK_ADMIN_SESSION_SECONDS: u64 = 900;
+
+fn admin_password_matches(supplied: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(supplied.as_bytes());
+    let actual = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    actual.len() == DEEPSEEK_ADMIN_PASSWORD_SHA256.len()
+        && actual.as_bytes().iter().zip(DEEPSEEK_ADMIN_PASSWORD_SHA256.as_bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+}
+
+fn admin_session_mac(payload: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"coomi-deepseek-admin-session-v1:");
+    hasher.update(DEEPSEEK_ADMIN_PASSWORD_SHA256.as_bytes());
+    hasher.update(b":");
+    hasher.update(payload.as_bytes());
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn issue_admin_session(now: u64) -> String {
+    let expiry = now.saturating_add(DEEPSEEK_ADMIN_SESSION_SECONDS);
+    let nonce = Uuid::new_v4().simple().to_string();
+    let payload = format!("{expiry}.{nonce}");
+    format!("{payload}.{}", admin_session_mac(&payload))
+}
+
+fn admin_session_valid(token: &str, now: u64) -> bool {
+    let mut parts = token.split('.');
+    let (Some(expiry), Some(nonce), Some(mac), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else { return false };
+    let Ok(expiry) = expiry.parse::<u64>() else { return false };
+    if expiry < now || expiry > now.saturating_add(DEEPSEEK_ADMIN_SESSION_SECONDS + 5) {
+        return false;
+    }
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) || mac.len() != 64 {
+        return false;
+    }
+    let payload = format!("{expiry}.{nonce}");
+    let expected = admin_session_mac(&payload);
+    (expected.len() ^ mac.len()) == 0
+        && expected.as_bytes().iter().zip(mac.as_bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+}
+
+fn require_deepseek_admin(body: &Value) -> Result<(), ApiError> {
+    let token = body.get("adminSession").and_then(Value::as_str).unwrap_or("");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    if admin_session_valid(token, now) { Ok(()) }
+    else { Err(ApiError::forbidden("管理员验证已失效，请重新验证")) }
+}
+
+async fn admin_verify_handler(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    if let Some(token) = body.get("adminSession").and_then(Value::as_str) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        if admin_session_valid(token, now) {
+            return Ok(Json(json!({"ok": true, "adminSession": token, "expiresAt": now + DEEPSEEK_ADMIN_SESSION_SECONDS})));
+        }
+    }
+    let password = body.get("adminPassword").and_then(Value::as_str).unwrap_or("");
+    if !admin_password_matches(password) {
+        return Err(ApiError::forbidden("管理员密码错误"));
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    Ok(Json(json!({"ok": true, "adminSession": issue_admin_session(now), "expiresAt": now + DEEPSEEK_ADMIN_SESSION_SECONDS})))
+}
+
 fn deepseek_settings_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("config").join("deepseek.json")
 }
@@ -1624,6 +1770,7 @@ async fn deepseek_login_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let account = body.get("account").and_then(Value::as_str).unwrap_or("").trim().to_string();
     let password = body.get("password").and_then(Value::as_str).unwrap_or("").to_string();
     if account.is_empty() || password.is_empty() {
@@ -1639,8 +1786,10 @@ async fn deepseek_login_handler(
 }
 
 async fn deepseek_sms_send_handler(
+    State(_state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let mobile = body.get("mobile").and_then(Value::as_str).unwrap_or("").trim();
     let area_code = body.get("areaCode").and_then(Value::as_str).unwrap_or("+86").trim();
     if mobile.is_empty() {
@@ -1657,6 +1806,7 @@ async fn deepseek_sms_login_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let mobile = body.get("mobile").and_then(Value::as_str).unwrap_or("").trim();
     let area_code = body.get("areaCode").and_then(Value::as_str).unwrap_or("+86").trim();
     let code = body.get("code").and_then(Value::as_str).unwrap_or("").trim();
@@ -1707,7 +1857,9 @@ async fn deepseek_status_handler(
 
 async fn deepseek_logout_handler(
     State(state): State<AppState>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let path = deepseek_settings_path(&state.home);
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| ApiError::internal(format!("remove deepseek state: {e}")))?;
@@ -1736,6 +1888,7 @@ async fn deepseek_provider_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let model = body.get("model").and_then(Value::as_str).unwrap_or("deepseek-chat").trim().to_string();
     let thinking = body.get("thinkingEnabled").and_then(Value::as_bool).unwrap_or(true);
     let search = body.get("searchEnabled").and_then(Value::as_bool).unwrap_or(false);
@@ -1772,6 +1925,7 @@ async fn deepseek_model_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    require_deepseek_admin(&body)?;
     let model = body.get("model").and_then(Value::as_str).unwrap_or("deepseek-chat").trim().to_string();
     let thinking = body.get("thinkingEnabled").and_then(Value::as_bool).unwrap_or(true);
     let search = body.get("searchEnabled").and_then(Value::as_bool).unwrap_or(false);
@@ -2925,15 +3079,22 @@ async fn session_snapshot(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session_id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
-    let session = SessionStore::new(&state.home)
-        .load(session_id)
+    let task = state.tasks.lock().unwrap_or_else(|p| p.into_inner()).get(&id).cloned();
+    if let Some(task) = &task {
+        let view = task.view_checkpoint.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(base) = &view.base {
+            return Ok(Json(json!({
+                "session": base,
+                "events": view.events,
+                "event_seq": view.event_seq,
+                "running": task.running.load(Ordering::SeqCst),
+                "phase": task.phase.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            })));
+        }
+    }
+    let session = SessionStore::new(&state.home).load(session_id)
         .map_err(|error| ApiError::not_found(format!("failed to load session {id}: {error:#}")))?;
-    let running = state
-        .tasks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&id)
-        .is_some_and(|task| task.running.load(Ordering::SeqCst));
+    let running = task.as_ref().is_some_and(|task| task.running.load(Ordering::SeqCst));
     Ok(Json(json!({
         "session": session,
         "running": running,
@@ -7802,10 +7963,19 @@ async fn run_turn(
         // 意外中断、进程被杀、断线重连后都能从磁盘恢复完整上下文。
         .with_checkpoint({
             let checkpoint_store = SessionStore::new(&state.home);
+            // 视图检查点必须跟着会话一起前进：用户消息是在 run_turn 内部才写进
+            // session 的，若基准一直停在 begin_managed_task 那一刻（早于用户消息），
+            // 重进会话时「快照 = 基准 + 事件」就会丢掉上一轮提问（事件里没有用户消息）。
+            // 每次落盘都把基准换成刚保存的会话，并把已经体现在消息里的事件从增量里剔除。
+            let checkpoint_task = Arc::clone(&task);
             Arc::new(move |session: &Session| {
                 if let Err(error) = checkpoint_store.save(session) {
                     eprintln!("[checkpoint] failed to save session: {error}");
                 }
+                let Ok(value) = serde_json::to_value(session) else {
+                    return;
+                };
+                checkpoint_task.advance_view_checkpoint(value);
             })
         });
     // 无论成败都先保存会话：报错/中断时本轮已产生的消息（用户提问、工具结果、
@@ -9390,6 +9560,241 @@ impl IntoResponse for ApiError {
     }
 }
 
+
+// ========== 动态工作流（M1，见 dynwork.rs） ==========
+
+async fn dynwork_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let service = &state.dynamic_workflows;
+    Ok(Json(json!({
+        "drafts": service.drafts().list(),
+        "runs": service.runs().list(30),
+        "sandbox": crate::dynwork::sandbox_runtime_available(),
+    })))
+}
+
+async fn dynwork_save(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.dynamic_workflows.drafts();
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let description = body.get("description").and_then(Value::as_str).unwrap_or("");
+    let script = body.get("script").and_then(Value::as_str).unwrap_or("");
+    let meta = store
+        .save(&id, name, description, script)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    let scan = crate::dynwork::scan_script(script);
+    Ok(Json(json!({
+        "draft": meta,
+        "diagnostics": scan.diagnostics,
+        "commands": scan.commands,
+        "artifacts": scan.artifacts,
+    })))
+}
+
+async fn dynwork_get(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.dynamic_workflows.drafts();
+    let (meta, script) = store
+        .load(&id)
+        .map_err(|error| ApiError::not_found(format!("{error:#}")))?;
+    let scan = crate::dynwork::scan_script(&script);
+    Ok(Json(json!({
+        "draft": meta,
+        "script": script,
+        "diagnostics": scan.diagnostics,
+        "commands": scan.commands,
+        "artifacts": scan.artifacts,
+    })))
+}
+
+async fn dynwork_delete(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    state
+        .dynamic_workflows
+        .drafts()
+        .remove(&id)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// 确认门：把脚本原文、静态诊断、命令白名单摆给用户看。
+async fn dynwork_plan(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.dynamic_workflows.drafts();
+    let (meta, stored) = store
+        .load(&id)
+        .map_err(|error| ApiError::not_found(format!("{error:#}")))?;
+    let script = body
+        .get("script")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or(stored);
+    let draft = match body.get("name").and_then(Value::as_str) {
+        Some(name) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ => meta.name,
+    };
+    let scan = crate::dynwork::scan_script(&script);
+    Ok(Json(json!({
+        "draft": {"id": meta.id, "name": draft},
+        "script": script,
+        "diagnostics": scan.diagnostics,
+        "commands": scan.commands,
+        "artifacts": scan.artifacts,
+        "sandbox": crate::dynwork::sandbox_runtime_available(),
+    })))
+}
+
+async fn dynwork_run(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.dynamic_workflows.drafts();
+    let (mut draft, stored) = store
+        .load(&id)
+        .map_err(|error| ApiError::not_found(format!("{error:#}")))?;
+    let script = body
+        .get("script")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or(stored);
+    if let Some(name) = body.get("name").and_then(Value::as_str)
+        && !name.trim().is_empty()
+    {
+        draft = store
+            .save(
+                &draft.id,
+                name,
+                body.get("description").and_then(Value::as_str).unwrap_or(&draft.description),
+                &script,
+            )
+            .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    }
+    let scan = crate::dynwork::scan_script(&script);
+    if !scan.diagnostics.is_empty() {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "diagnostics",
+            "diagnostics": scan.diagnostics,
+            "commands": scan.commands,
+        })));
+    }
+    if body.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Ok(Json(json!({
+            "ok": false,
+            "reason": "confirm_required",
+            "commands": scan.commands,
+            "artifacts": scan.artifacts,
+        })));
+    }
+    if !crate::dynwork::sandbox_runtime_available() {
+        return Err(ApiError::bad_request(
+            "动态工作流沙箱需要 node 运行时（Debian 环境自带 /usr/bin/node）",
+        ));
+    }
+    let registry = Arc::new(
+        ProviderRegistry::load(&providers_path(&state.home))
+            .map_err(|error| ApiError::bad_request(format!("模型供应商不可用：{error:#}")))?,
+    );
+    if registry.resolve(None).is_err() {
+        return Err(ApiError::bad_request("请先配置并启用一个可用的模型供应商"));
+    }
+    let mcp = Arc::new(McpRuntime::load(&state.home).await);
+    let cwd = state.cwd.clone();
+    let deps = Arc::new(crate::dynwork::RunDeps {
+        home: state.home.clone(),
+        cwd: cwd.clone(),
+        permission: *state.permission.read().await,
+        registry,
+        mcp,
+        memory: Arc::new(MemoryManager::new(&state.home, &cwd)),
+    });
+    let seed_from = body
+        .get("seed_from")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|value| !value.is_empty());
+    let run_id = state
+        .dynamic_workflows
+        .start(deps, &draft, &script, &scan, seed_from)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    Ok(Json(json!({
+        "ok": true,
+        "run_id": run_id,
+        "commands": scan.commands,
+        "artifacts": scan.artifacts,
+    })))
+}
+
+async fn dynwork_run_get(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let service = &state.dynamic_workflows;
+    let meta = service
+        .runs()
+        .load_meta(&run)
+        .map_err(|error| ApiError::not_found(format!("{error:#}")))?;
+    let journal = service.runs().read_journal(&run, 0);
+    Ok(Json(json!({
+        "meta": meta,
+        "journal": journal,
+        "running": service.is_running(&run),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct DynworkEventsQuery {
+    #[serde(default)]
+    since: usize,
+}
+
+async fn dynwork_run_events(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+    Query(query): Query<DynworkEventsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let service = &state.dynamic_workflows;
+    let events = service.events_since(&run, query.since);
+    let journal_len = service.runs().read_journal(&run, 0).len();
+    Ok(Json(json!({
+        "events": events,
+        "running": service.is_running(&run),
+        "journal": journal_len,
+    })))
+}
+
+async fn dynwork_run_stop(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let stopped = state.dynamic_workflows.stop(&run);
+    if stopped
+        && let Ok(mut meta) = state.dynamic_workflows.runs().load_meta(&run)
+    {
+        meta.status = "stopped".into();
+        meta.stop_reason = "stopped(user)".into();
+        meta.finished_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+        let _ = state.dynamic_workflows.runs().save_meta(&meta);
+    }
+    Ok(Json(json!({"ok": true, "stopped": stopped})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9397,6 +9802,42 @@ mod tests {
     use coomi_services::MemoryManager;
     use coomi_services::MemoryScope;
     use coomi_services::MemoryType;
+
+    #[test]
+    fn view_checkpoint_follows_saved_session_and_drops_applied_events() {
+        let task = SessionTask::new();
+        *task.view_checkpoint.lock().unwrap() = ViewCheckpoint {
+            base: Some(json!({"messages": []})),
+            events: Vec::new(),
+            event_seq: 0,
+        };
+        task.push_event(json!({"event_type": "text_chunk", "content": "a"}));
+        task.push_event(json!({
+            "event_type": "tool_start",
+            "call_id": "call-1",
+            "tool_name": "read_file"
+        }));
+
+        // 会话落盘：此刻磁盘上的 messages 已经包含上面两个事件的成果。
+        task.advance_view_checkpoint(json!({"messages": [{"role": "user", "content": "问题"}]}));
+
+        {
+            let view = task.view_checkpoint.lock().unwrap();
+            assert_eq!(
+                view.base.as_ref().unwrap()["messages"][0]["content"],
+                "问题",
+                "基准必须换成刚落盘的会话，用户消息才会随快照恢复"
+            );
+            assert!(view.events.is_empty(), "已写进会话的事件必须从增量里剔除");
+            assert_eq!(view.event_seq, 2);
+        }
+
+        task.push_event(json!({"event_type": "text_chunk", "content": "b"}));
+        let view = task.view_checkpoint.lock().unwrap();
+        assert_eq!(view.events.len(), 1, "落盘之后的新事件仍要留在增量里");
+        assert_eq!(view.events[0]["content"], "b");
+        assert_eq!(view.events[0]["event_seq"], 3);
+    }
 
     #[test]
     fn stale_websocket_cannot_detach_replacement_connection() {
@@ -9904,6 +10345,7 @@ mod tests {
             studio_approvals: Arc::new(StdMutex::new(HashMap::new())),
             studio_runs: Arc::new(StdMutex::new(HashMap::new())),
             studio_events: Arc::new(StdMutex::new(HashMap::new())),
+        dynamic_workflows: Arc::new(crate::dynwork::DynamicWorkflows::new(&home)),
             group_chat_runs: Arc::new(StdMutex::new(HashMap::new())),
             collab_runs: Arc::new(StdMutex::new(HashMap::new())),
         };

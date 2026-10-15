@@ -55,6 +55,8 @@ async function run(detail:MorphRequest) {
         {transform:'translate(-50%,-50%) scale(1.5)',opacity:0},
       ],{duration:250,delay:370,easing:'ease-out',fill:'both'}))
     }
+    target.classList.add('send-tracer-active')
+    window.setTimeout(() => target?.classList.remove('send-tracer-active'), 900)
     await flight.finished
   } catch { /* cancelled or unsupported animation: reveal the actual message immediately */ }
   finally {
@@ -71,5 +73,5 @@ onBeforeUnmount(()=>{disposed=true;stop();window.removeEventListener('coomi:send
 <template><div v-show="active" ref="dot" class="send-morph-dot" aria-hidden="true"/><div v-show="active" ref="ripple" class="send-ripple" aria-hidden="true"/></template>
 <style scoped>
 .send-morph-dot{position:fixed;left:0;top:0;z-index:95;pointer-events:none;border-radius:50%;background:var(--blue);box-shadow:0 0 10px color-mix(in srgb,var(--blue) 35%,transparent);will-change:transform,opacity}
-.send-ripple{position:fixed;width:30px;height:30px;z-index:94;pointer-events:none;border:1px solid var(--blue);border-radius:50%}
+.send-ripple{position:fixed;width:30px;height:30px;z-index:94;pointer-events:none;border:1px solid var(--blue);border-radius:50%;will-change:transform,opacity}
 </style>

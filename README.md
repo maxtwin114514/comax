@@ -22,7 +22,7 @@
   <a href="https://qm.qq.com/q/2JVYVRKnBe"><strong>💬 QQ 交流群 1108467806</strong></a>
 </p>
 
-- 最新版：**v1.5.2-flash**（versionCode 78）
+- 最新版：**v1.5.2o4beta**（versionCode 81）
 - 官网：https://api.monai.ccwu.cc/coomi/
 - GitHub：https://github.com/maxtwin114514/comax
 

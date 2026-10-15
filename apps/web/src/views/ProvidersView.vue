@@ -138,9 +138,12 @@ function backToDashboard() {
   <div class="page">
     <PageHead title="提供商配置" @back="backToDashboard">
       <template #right>
-        <button v-if="tab === 'providers'" class="icon-btn blue" aria-label="添加提供商" @click="router.push('/providers/new')">
-          <CoomiIcon name="plus" />
-        </button>
+        <div v-if="tab === 'providers'" class="head-actions">
+          <button class="deepseek-entry" type="button" @click="router.push('/deepseek-login')">DeepSeek 账号</button>
+          <button class="icon-btn blue" aria-label="添加提供商" @click="router.push('/providers/new')">
+            <CoomiIcon name="plus" />
+          </button>
+        </div>
       </template>
     </PageHead>
 
@@ -214,6 +217,7 @@ function backToDashboard() {
 
 <style scoped>
 .page { display: flex; flex-direction: column; height: 100%; background: var(--page); }
+.head-actions{display:flex;align-items:center;gap:4px}.deepseek-entry{min-height:34px;padding:0 10px;border:1px solid var(--blue-border);border-radius:var(--r-pill);background:var(--blue-soft);color:var(--blue);font-size:12px;font-weight:650}
 .body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px calc(var(--safe-bottom) + 24px); }
 .tabs { display:flex; gap:3px; margin-bottom:12px; padding:3px; border-radius:var(--r-pill); background:var(--fill-strong); }
 .tabs button { display:flex; flex:1; align-items:center; justify-content:center; gap:6px; min-height:36px; border-radius:var(--r-pill); color:var(--text-3); font-size:13.5px; font-weight:600; }

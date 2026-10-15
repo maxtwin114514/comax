@@ -184,22 +184,19 @@ async function copyAll() {
 .row.user { justify-content: flex-end; }
 .row.user.morph-pending { visibility: hidden; }
 .row.user.morph-arrived .bubble { animation: send-drop-settle .3s cubic-bezier(.2,.78,.22,1.24) both; }
-  .row.user.morph-arrived .bubble::after {
+.row.user.morph-arrived .bubble::after, .bubble.send-tracer-active::after {
   content: ''; position: absolute; pointer-events: none; inset: -3px;
   border-radius: 21px 21px 9px 21px;
-  background: conic-gradient(from 0deg,
-    transparent 0deg, transparent 200deg,
-    rgba(255,255,255,.95) 232deg,
-    color-mix(in srgb, var(--blue) 70%, #fff) 252deg,
-    transparent 292deg, transparent 360deg);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 5px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 5px));
-  animation: send-orbit .7s linear both;
+  border:1.5px solid transparent;
+  background:linear-gradient(var(--blue),var(--blue)) padding-box,
+    linear-gradient(90deg,transparent,var(--blue),rgba(255,255,255,.95),transparent) border-box;
+  background-size:100% 100%,220% 100%;
+  animation:send-border-travel .8s linear both;
 }
 .row.user.morph-arrived .acts .act { animation: send-action-drop .38s cubic-bezier(.18,.82,.24,1.34) both; }
 .row.user.morph-arrived .acts .act:nth-child(2) { animation-delay: .07s; }
 @keyframes send-drop-settle { 0% { transform:scale(.82,.62); opacity:.2 } 68% { transform:scale(1.035,.97) } 100% { transform:none; opacity:1 } }
-@keyframes send-orbit { 0% { opacity:0; transform:rotate(0deg) scale(1) } 12% { opacity:1 } 86% { opacity:1 } 100% { opacity:0; transform:rotate(360deg) scale(1) } }
+@keyframes send-border-travel { 0%{opacity:0;background-position:0 0,-120% 0} 12%{opacity:1} 86%{opacity:1} 100%{opacity:0;background-position:0 0,180% 0} }
 @keyframes send-action-drop { 0% { opacity:0; transform:translateX(18px) scale(.45); border-radius:50% } 70% { opacity:1; transform:translateX(-2px) scale(1.06) } 100% { opacity:1; transform:none } }
 .bubble {
   position: relative;

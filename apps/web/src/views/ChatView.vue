@@ -42,7 +42,6 @@ const config = useConfigStore()
 
 const scroller = ref<HTMLElement | null>(null)
 const virtualScroller = ref<InstanceType<typeof DynamicScroller> | null>(null)
-const content = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 /** 产物思维导图抽屉：从右边缘左滑打开，与左侧会话抽屉互斥。 */
 const mindMapOpen = ref(false)
@@ -52,7 +51,11 @@ let mindMapTouching = false
 /** 全局轮询「后台运行中」状态的定时器（会话列表转圈的数据源）。 */
 let runningPoll: ReturnType<typeof setInterval> | null = null
 
-const { following, follow, jumpToBottom } = useAutoScroll(scroller)
+function settleVirtualBottom() {
+  const scrollerApi = virtualScroller.value as unknown as { scrollToBottom?: () => void } | null
+  scrollerApi?.scrollToBottom?.()
+}
+const { following, follow, jumpToBottom } = useAutoScroll(scroller, settleVirtualBottom)
 
 const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.timeline))
 
@@ -64,13 +67,10 @@ function syncDigitalLifeMode() {
 /** 页面重新可见：隐藏期间事件只在引擎侧累计，回来时一次性以权威快照恢复。 */
 function onVisibilityChange() {
   if (document.hidden) return
-  if (session.runState === 'idle') return
-  void session.restoreFromEngine(session.sessionId).then(() => {
+  void session.resumeFromBackground().then(() => {
     session.connect()
   })
 }
-
-let ro: ResizeObserver | null = null
 
 onMounted(() => {
   session.connect()
@@ -94,13 +94,13 @@ onMounted(() => {
   void sessions.refreshRunning()
   runningPoll = setInterval(() => { sessions.refreshRunning(); void session.refreshLifeUnread(); session.autoDeliverLifeIfReady() }, 2000)
   void session.refreshLifeUnread()
-  // 高度只要变就重新贴底（内部有 rAF 合并，不怕高频触发）
-  if (typeof ResizeObserver !== 'undefined') {
-    ro = new ResizeObserver(() => follow())
-    if (content.value) ro.observe(content.value)
-    if (scroller.value) ro.observe(scroller.value)
-  }
-  nextTick(follow)
+  // DynamicScroller 自己作为唯一滚动容器，避免父级与虚拟列表同时写入位置。
+  nextTick(() => {
+    const element = (virtualScroller.value as any)?.$el
+    scroller.value = element instanceof HTMLElement ? element : null
+    follow()
+    void session.restoreFromEngine(session.sessionId)
+  })
   // 演示模式自动播一轮，省得进来还要先打字才能看见瀑布流。
   if (shouldAutoplay() && session.timeline.length === 0) {
     setTimeout(() => { if (session.timeline.length === 0) session.sendMessage(DEMO_PROMPT) }, 700)
@@ -119,7 +119,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchmove', onMindMapTouchMove)
   window.removeEventListener('touchend', onMindMapTouchEnd)
   if (runningPoll) { clearInterval(runningPoll); runningPoll = null }
-  ro?.disconnect(); ro = null
 })
 
 /**
@@ -146,6 +145,19 @@ if (isUnattended()) {
 
 // ResizeObserver 不可用时的兜底：至少条目增减能跟上。
 watch(() => session.timeline.length, () => nextTick(follow))
+// 空态与虚拟列表互斥渲染，滚动容器会在挂载/卸载间切换：列表一上屏就接管滚动。
+watch(virtualScroller, value => {
+  const element = (value as { $el?: unknown } | null)?.$el
+  scroller.value = element instanceof HTMLElement ? element : null
+  nextTick(follow)
+})
+// 完整历史恢复 / 切换会话后必须按新列表的真实高度重新置底；仅监听长度不够，
+// 因为两个会话完全可能恰好拥有相同数量的时间线块。
+watch(() => session.viewRevision, () => nextTick(() => {
+  following.value = true
+  settleVirtualBottom()
+  jumpToBottom()
+}))
 // 流式输出时气泡高度持续变化，但 DynamicScroller 内部容器不是 ResizeObserver 观察对象：
 // usage_update（输出 token 增长时持续推送）是可靠的「内容在变」信号，据此贴底。
 watch(() => session.usage?.output, () => follow(), { deep: false })
@@ -195,32 +207,33 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
     <div class="shell" :class="{ pushed: drawerOpen }">
       <TopBar :menu-open="drawerOpen" @menu="openDrawer" />
 
-      <main ref="scroller" class="stream">
-        <div v-if="session.timeline.length === 0" ref="content" class="inner empty-inner">
-          <EmptyState v-if="session.timeline.length === 0" />
-        </div>
-        <DynamicScroller
-          v-else
-          ref="virtualScroller"
-          :items="blocks"
-          key-field="key"
-          :min-item-size="48"
-          :buffer="640"
-          class="virtual-stream"
-          page-mode
-        >
-          <template #default="{ item, index, active }">
-            <DynamicScrollerItem
-              :item="item"
-              :active="active"
-              :size-dependencies="item.t === 'one' ? [item.item] : [item.cards]"
-              :data-index="index"
-              class="virtual-item"
-            >
-              <TimelineBlock :block="item" />
-            </DynamicScrollerItem>
-          </template>
-        </DynamicScroller>
+      <DynamicScroller
+        v-if="blocks.length > 0"
+        ref="virtualScroller"
+        :items="blocks"
+        key-field="key"
+        :min-item-size="48"
+        :buffer="360"
+        class="stream virtual-stream"
+      >
+        <template #default="{ item, index, active }">
+          <DynamicScrollerItem
+            :item="item"
+            :active="active"
+            :data-index="index"
+            :emit-resize="true"
+            class="virtual-item"
+            @resize="follow"
+          >
+            <TimelineBlock :block="item" />
+          </DynamicScrollerItem>
+        </template>
+      </DynamicScroller>
+      <!-- 空态必须独立渲染：DynamicScroller 的 #empty 插槽是无条件渲染进滚动内容的
+           （不是「列表为空才渲染」），会一直贴在内容顶部把格言显示在对话上方。
+           这里回到以前的独立空态层：撑满可视区并按整块高度居中。 -->
+      <main v-if="blocks.length === 0" class="stream">
+        <div class="inner empty-inner"><EmptyState /></div>
       </main>
 
       <Transition name="pop">
@@ -317,8 +330,11 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   width: 100%; min-width: 0; min-height: 100%; padding: 10px 12px 18px; overflow-x: hidden;
 }
 .empty-inner { min-height: 100%; }
-.virtual-stream { width: 100%; min-width: 0; padding: 10px 12px 18px; overflow: visible; }
+.virtual-stream { width: 100%; min-width: 0; padding: 10px 12px 18px; }
 .virtual-item { width: 100%; min-width: 0; padding-bottom: 12px; }
+/* 虚拟列表回收历史 DOM 时不重播入场位移，否则滑过回收边界就像整页跳一下。
+   实时工具、推理展开与发送水滴仍保留各自的专用动画。 */
+.virtual-stream :deep(.cascade) { animation: none; }
 
 .to-bottom {
   position: absolute; left: 50%; bottom: 116px; z-index: 8;

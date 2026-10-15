@@ -39,6 +39,7 @@ mod life;
 mod assistant;
 mod billing;
 mod terminal_ui;
+mod dynwork;
 mod web;
 mod workflow;
 

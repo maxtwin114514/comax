@@ -151,36 +151,61 @@ impl ContextState {
 }
 
 pub fn normalize_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    let mut known_calls = HashSet::new();
-    for message in messages {
-        if message.role == Role::Assistant {
-            known_calls.extend(message.tool_calls.iter().map(|call| call.id.clone()));
-        }
-    }
-
-    let output_ids = messages
-        .iter()
-        .filter(|message| message.role == Role::Tool)
-        .filter_map(|message| message.tool_call_id.clone())
-        .collect::<HashSet<_>>();
     let mut output = Vec::with_capacity(messages.len());
-    for message in messages {
-        if message.role == Role::Tool
-            && message
-                .tool_call_id
-                .as_ref()
-                .is_none_or(|id| !known_calls.contains(id))
-        {
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        // A tool result is meaningful only directly after the assistant turn
+        // that requested it. Orphans commonly remain after cancellation or an
+        // interrupted reconnect and must not leak into the next provider call.
+        if message.role == Role::Tool {
+            index += 1;
             continue;
         }
         output.push(message.clone());
-        if message.role == Role::Assistant {
-            for call in &message.tool_calls {
-                if !output_ids.contains(&call.id) {
-                    output.push(ChatMessage::tool(&call.id, "error: aborted"));
+        index += 1;
+        if message.role != Role::Assistant || message.tool_calls.is_empty() {
+            continue;
+        }
+
+        let expected = message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut delivered = HashSet::new();
+        let mut deferred_internal = Vec::new();
+        // Consume only the contiguous tool-result block. OpenAI-compatible
+        // APIs require this exact adjacency, not merely a matching id somewhere
+        // later in the history.
+        while index < messages.len() {
+            let next = &messages[index];
+            if next.role == Role::Tool {
+                if let Some(id) = next.tool_call_id.as_deref()
+                    && expected.contains(id)
+                    && delivered.insert(id)
+                {
+                    output.push(next.clone());
                 }
+                index += 1;
+                continue;
+            }
+            // Core tools may add an internal context message after each result.
+            // Hold those messages until every result for this assistant turn is
+            // emitted; otherwise DeepSeek sees a user message between tool rows.
+            if next.role == Role::User && next.internal && delivered.len() < expected.len() {
+                deferred_internal.push(next.clone());
+                index += 1;
+                continue;
+            }
+            break;
+        }
+        for call in &message.tool_calls {
+            if !delivered.contains(call.id.as_str()) {
+                output.push(ChatMessage::tool(&call.id, "error: aborted"));
             }
         }
+        output.extend(deferred_internal);
     }
     output
 }
@@ -374,6 +399,27 @@ mod tests {
         assert_eq!(normalized.len(), 2);
         assert_eq!(normalized[1].tool_call_id.as_deref(), Some("one"));
         assert!(normalized[1].content.contains("aborted"));
+    }
+
+    #[test]
+    fn normalization_keeps_tool_results_adjacent_to_their_assistant_turn() {
+        let messages = vec![
+            ChatMessage::assistant(
+                "",
+                vec![ToolCall {
+                    id: "one".into(),
+                    name: "read_file".into(),
+                    arguments: json!({}),
+                }],
+            ),
+            ChatMessage::user("插队消息"),
+            ChatMessage::tool("one", "late result"),
+        ];
+        let normalized = normalize_history(&messages);
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[1].tool_call_id.as_deref(), Some("one"));
+        assert!(normalized[1].content.contains("aborted"));
+        assert_eq!(normalized[2].role, Role::User);
     }
 
     #[test]
