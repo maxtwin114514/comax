@@ -10,10 +10,10 @@
   <img alt="local first" src="https://img.shields.io/badge/local--first-full%20control-334155?style=flat-square" />
 </p>
 
-**Comax** 是基于 [Coomi](https://github.com/TensorHub-ORG/Coomi) 深度魔改的 Android 本地优先智能体（Agent）平台：
+**Comax** 是基于 [Comax](https://github.com/TensorHub-ORG/Coomi) 深度魔改的 Android 本地优先智能体（Agent）平台：
 内置 Rust 智能体引擎、终端式虚拟环境、可扩展的 SKILL / MCP 工具链和 Vue 对话界面。模型服务可自定义配置，会话与文件只留在设备本地，Agent 可以真实执行命令、读写文件、识别图片、操控屏幕并展示结果。
 
-> 本项目是 Coomi 的分支 / 魔改版，在保留上游全部能力的基础上，为个人与群体使用体验做了大量增强（见下方「魔改特性」）。
+> 本项目是 Comax 的分支 / 魔改版，在保留上游全部能力的基础上，为个人与群体使用体验做了大量增强（见下方「魔改特性」）。
 
 ## 官网与下载
 
@@ -26,7 +26,7 @@
 - 官网：https://api.monai.ccwu.cc/coomi/
 - GitHub：https://github.com/maxtwin114514/comax
 
-## 魔改特性（相对上游 Coomi）
+## 魔改特性（相对上游 Comax）
 
 - **控制模式**：主动申请无障碍权限 + 桌面悬浮窗（可收起成悬浮球），Agent 可以真实操控屏幕（点击 / 滑动 / 输入），任务规划与工具调用过程悬浮在屏幕上方实时显示；悬浮窗内置输入框，支持唤起输入法。
 - **上下文压缩增强**：压缩摘要按「已完成 / 进行中 / 待办 / 关键上下文」分段，避免重复执行已完成的任务。
@@ -83,5 +83,5 @@ Comax-Android/
 
 ## 致谢
 
-- 上游项目：[Coomi](https://github.com/TensorHub-ORG/Coomi)（Apache-2.0）
+- 上游项目：[Comax](https://github.com/TensorHub-ORG/Coomi)（Apache-2.0）
 - Copyright 2026 Septemc and TensorHub（上游）；Comax 魔改部分 Copyright 2026 晚风

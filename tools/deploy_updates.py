@@ -6,7 +6,7 @@ import paramiko
 
 HOST, PORT, USER, PASSWORD = "8.148.146.68", 50302, "root", "Root114514"
 APK = r"apps/coomi-app/app/build/outputs/apk/release/coomi-app_apt-android-7-release_arm64-v8a.apk"
-NAME = "Coomi-Android-arm64-v1.4.3.apk"
+NAME = "Comax-Android-arm64-v1.4.3.apk"
 BASE = "/www/wwwroot/updates.septemc.com/coomi"
 NOTES = """v1.4.3 更新说明【稳定】
 

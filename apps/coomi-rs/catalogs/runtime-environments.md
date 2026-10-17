@@ -11,7 +11,7 @@ Use the environment router rather than guessing paths or manually prefixing comm
 
 ## Environments
 
-- `host`: Android/Coomi file APIs, exports, and security checks.
+- `host`: Android/Comax file APIs, exports, and security checks.
 - `termux`: Android-native ARM64 tools, USB, notifications, and Android bridges.
 - `proot`: Linux userland tools such as Git, Python, Node, Rust, and Linux shell scripts.
 - `auto`: prefer ProotLinux when ready, otherwise Termux; use `host` only for file/API work.

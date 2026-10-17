@@ -118,7 +118,7 @@ onMounted(load)
       </template>
     </PageHead>
     <main class="body">
-      <p class="scope-note">这里只管理 Coomi 内建持久记忆，与任何 MCP、Skill 或第三方记忆扩展无关。</p>
+      <p class="scope-note">这里只管理 Comax 内建持久记忆，与任何 MCP、Skill 或第三方记忆扩展无关。</p>
       <p v-if="loading" class="empty">加载中…</p>
       <p v-else-if="!memories.length" class="empty">暂无内建持久记忆</p>
       <article v-for="item in memories" :key="item.name" :class="['memory', { expanded: expanded.has(item.name) }]">

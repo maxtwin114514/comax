@@ -1,7 +1,7 @@
 {
   "version": 1,
   "id": "coomi-life",
-  "display_name": "Coomi Life",
+  "display_name": "Comax Life",
   "experimental": true,
   "requires_runtime": "proot_linux",
   "requires_python": ">=3.11",

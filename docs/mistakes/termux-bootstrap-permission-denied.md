@@ -2,7 +2,7 @@
 
 ## 事故概述
 
-Coomi-Android 1.2.6 将 `targetSdkVersion` 从 28 提升到 36。应用仍把 Termux bootstrap 解压到私有可写目录，并从以下路径启动 shell：
+Comax-Android 1.2.6 将 `targetSdkVersion` 从 28 提升到 36。应用仍把 Termux bootstrap 解压到私有可写目录，并从以下路径启动 shell：
 
 ```text
 /data/data/com.coomi.android/files/usr/bin/bash
@@ -34,10 +34,10 @@ Android 会根据目标 SDK 为普通应用选择 SELinux 执行域。target 29 
 
 ```text
 1. aapt dump badging：确认 APK targetSdkVersion=28。
-2. ps -AZ：确认真实 Coomi 进程为 untrusted_app_27，而不是 runas_app。
+2. ps -AZ：确认真实 Comax 进程为 untrusted_app_27，而不是 runas_app。
 3. 由 CoomiSetupActivity 自身执行部署，不使用 run-as 代测。
 4. 确认 ~/.coomi_deployed 存在并记录 coomi 版本与 APK 原生库路径。
-5. 确认安装向导自动进入模型配置，日志没有 Coomi 相关 Permission denied。
+5. 确认安装向导自动进入模型配置，日志没有 Comax 相关 Permission denied。
 ```
 
 ## 发布检查清单

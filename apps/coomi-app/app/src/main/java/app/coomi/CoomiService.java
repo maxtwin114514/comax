@@ -32,9 +32,35 @@ public class CoomiService extends Service {
     private static final String LOG_TAG = "CoomiService";
     private static final int HEALTH_CHECK_TIMEOUT_MS = 2000;
     private static final int CMD_TIMEOUT_SEC = 30;
-    /** ~/.profile 与 ~/.bashrc 里由 Coomi 管理的块标记：块内整体替换，块外保留用户内容。 */
-    private static final String SHELL_BLOCK_START = "# >>> Coomi Android managed block >>>";
-    private static final String SHELL_BLOCK_END = "# <<< Coomi Android managed block <<<";
+    /**
+     * 起进程后等它变健康的上限。
+     *
+     * 之前是"拉起就报成功"：引擎若因端口冲突/二进制被 SELinux 拦/配置损坏而秒退，
+     * 前端已经显示"已启动"，要等 30 秒后监控才发现不健康再重试 —— 用户看到的就是
+     * 「一直启动中，最后失败」。改成同步等健康，失败立刻带日志重来。
+     */
+    private static final int ENGINE_START_WAIT_MS = 12_000;
+    private static final int ENGINE_HEALTH_POLL_MS = 300;
+    /** 引擎日志超出这个大小就轮转，避免长期使用后几个 GB 的日志把存储写满。 */
+    private static final long ENGINE_LOG_MAX_BYTES = 8L * 1024 * 1024;
+    /** 日志轮转后保留的尾部大小（排错需要的就是最后这一段）。 */
+    private static final int ENGINE_LOG_KEEP_BYTES = 1 * 1024 * 1024;
+    /** ~/.profile 与 ~/.bashrc 里由 Comax 管理的块标记：块内整体替换，块外保留用户内容。 */
+    /**
+     * 判定「这是 Comax 自己拉起来的进程」的特征串（扫描 /proc 用）。
+     *
+     * - 引擎二进制名：引擎本体，以及 `sh -c "... exec libcoomi.so ..."` 那层包装；
+     * - 运行时目录：proot 宿主与 guest 里跑着的工具子进程。
+     *
+     * 两个特征都只在**本应用 UID** 下才有，所以不会误杀别的应用；反过来，
+     * 引擎被强杀后这些子进程会被 reparent 到 init 继续跑，正是需要清掉的那批。
+     */
+    private static final String[] STALE_PROCESS_MARKERS = {
+        CoomiConstants.NATIVE_BINARY_NAME,
+        "/runtime-v2/",
+    };
+    private static final String SHELL_BLOCK_START = "# >>> Comax Android managed block >>>";
+    private static final String SHELL_BLOCK_END = "# <<< Comax Android managed block <<<";
 
     private final IBinder mBinder = new LocalBinder();
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
@@ -290,12 +316,12 @@ public class CoomiService extends Service {
     }
 
     /**
-     * 把 Coomi 需要的环境变量写入 ~/.profile / ~/.bashrc。
+     * 把 Comax 需要的环境变量写入 ~/.profile / ~/.bashrc。
      * 用「托管块」而非整文件覆盖：软件升级不会丢用户自定义的终端环境。
      */
     private void writeShellEnvironment() throws Exception {
         writeShellBlock(new File(home(), ".profile"),
-            "# Created by Coomi Android\n"
+            "# Created by Comax Android\n"
                 + "export PREFIX=\"" + prefix() + "\"\n"
                 + "export HOME=\"" + home() + "\"\n"
                 + "export COOMI_HOME=\"$HOME/.coomi\"\n"
@@ -304,7 +330,7 @@ public class CoomiService extends Service {
                 + "export PATH=\"$PREFIX/bin:$PATH\"\n"
                 + "[ -f ~/.bashrc ] && . ~/.bashrc\n");
         writeShellBlock(new File(home(), ".bashrc"),
-            "# Created by Coomi Android\n"
+            "# Created by Comax Android\n"
                 + "export COOMI_HOME=\"$HOME/.coomi\"\n"
                 + "export COOMI_SHELL=\"$PREFIX/bin/bash\"\n"
                 + "export SSL_CERT_FILE=\"$PREFIX/etc/tls/cert.pem\"\n"
@@ -314,10 +340,10 @@ public class CoomiService extends Service {
     /** 幂等合并写入：仅替换两个标记之间的托管块，块外用户内容原样保留。 */
     private void writeShellBlock(File file, String body) throws Exception {
         String existing = file.exists() ? readText(file) : "";
-        // 旧版（无块标记）整文件都是 Coomi 生成的：整体迁移为新格式。
+        // 旧版（无块标记）整文件都是 Comax 生成的：整体迁移为新格式。
         // 旧版本来就是覆盖写，用户内容无从保留，一次性迁移后进入块保护。
         if (!existing.isEmpty() && !existing.contains(SHELL_BLOCK_START)
-            && existing.contains("# Created by Coomi Android")) {
+            && existing.contains("# Created by Comax Android")) {
             existing = "";
         }
         String block = SHELL_BLOCK_START + "\n" + body + SHELL_BLOCK_END + "\n";
@@ -397,6 +423,132 @@ public class CoomiService extends Service {
     }
 
     /** 引擎自身写入的指纹（~/.coomi/engine.version，MD5+版本）是否与 APK 内二进制一致。 */
+    /** 引擎日志轮转：超限就只保留尾部，避免长期使用后把存储写满。 */
+    private void rotateEngineLogIfHuge() {
+        File log = new File(CoomiConstants.ENGINE_LOG_PATH);
+        if (!log.isFile() || log.length() <= ENGINE_LOG_MAX_BYTES) return;
+        try {
+            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "rw");
+            try {
+                long keepFrom = Math.max(0, raf.length() - ENGINE_LOG_KEEP_BYTES);
+                byte[] tail = new byte[(int) (raf.length() - keepFrom)];
+                raf.seek(keepFrom);
+                raf.readFully(tail);
+                raf.setLength(0);
+                raf.seek(0);
+                raf.write(("[--- log rotated, kept last " + tail.length + " bytes ---]\n").getBytes("UTF-8"));
+                raf.write(tail);
+            } finally {
+                raf.close();
+            }
+            Logger.logInfo(LOG_TAG, "Rotated oversized engine log");
+        } catch (Exception error) {
+            Logger.logError(LOG_TAG, "Failed to rotate engine log: " + error.getMessage());
+        }
+    }
+
+    /** 取引擎日志尾部（排错用）。读不到就返回空串，绝不抛。 */
+    private static String tailEngineLog(int maxChars) {
+        File log = new File(CoomiConstants.ENGINE_LOG_PATH);
+        if (!log.isFile()) return "";
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r")) {
+            long length = raf.length();
+            int want = (int) Math.min(length, maxChars);
+            byte[] buffer = new byte[want];
+            raf.seek(length - want);
+            raf.readFully(buffer);
+            String text = new String(buffer, java.nio.charset.StandardCharsets.UTF_8).trim();
+            // 只留最后 12 行：完整的启动日志动辄上千行，UI 里显示不完也没用。
+            String[] lines = text.split("\n");
+            int from = Math.max(0, lines.length - 12);
+            StringBuilder tail = new StringBuilder();
+            for (int i = from; i < lines.length; i++) {
+                if (tail.length() > 0) tail.append('\n');
+                tail.append(lines[i]);
+            }
+            return tail.toString();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * 等引擎变健康。
+     *
+     * @return true 表示健康；false 表示进程提前退出或超时。
+     */
+    private boolean waitForHealthy(Process process, int port) {
+        long deadline = android.os.SystemClock.elapsedRealtime() + ENGINE_START_WAIT_MS;
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (process != null && !process.isAlive()) return false;
+            if (checkHealth(port)) return true;
+            try {
+                Thread.sleep(ENGINE_HEALTH_POLL_MS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return checkHealth(port);
+    }
+
+    /**
+     * 部署自愈。
+     *
+     * 起因：`startEngineSync` 硬依赖 ~/.coomi_deployed 这个 marker，marker 一旦丢失
+     * （清数据、清理脚本、旧版本迁移中断）就直接报 "coomi-rs is not deployed"，
+     * 而且**永远不会自己恢复** —— 用户只能重装。这是「升级后无法启动引擎」里最硬的
+     * 一堵墙。
+     *
+     * 这里只做引擎启动真正需要的最小修复：建运行目录、刷新 bin/coomi 软链、校验
+     * 二进制能跑、补回 marker。终端的 .profile/.bashrc 托管块不在这里写 —— 那只影响
+     * 终端便利性，不影响引擎。
+     *
+     * @return null 表示已就绪；否则返回给用户看的失败原因。
+     */
+    private String repairDeploymentIfNeeded() {
+        boolean markerPresent = isDeployComplete();
+        // 软链检查本身依赖 marker，所以先看二进制与软链是否真的可用
+        File binary = nativeBinary();
+        if (!binary.isFile()) {
+            return "APK 内缺少 ARM64 引擎二进制（" + binary.getAbsolutePath() + "），请重新安装本应用";
+        }
+        File link = new File(prefix() + "/bin/coomi");
+        boolean linkOk = false;
+        try {
+            linkOk = link.isFile() && binary.getAbsolutePath().equals(Os.readlink(link.getAbsolutePath()));
+        } catch (ErrnoException ignored) {
+            linkOk = false;
+        }
+        if (markerPresent && linkOk) return null;
+
+        Logger.logInfo(LOG_TAG, "Repairing deployment (markerPresent=" + markerPresent + ", linkOk=" + linkOk + ")");
+        CommandResult directories = execTermux(
+            "mkdir -p " + shellQuote(home() + "/.coomi/config")
+                + " " + shellQuote(home() + "/.coomi/sessions")
+                + " " + shellQuote(prefix() + "/bin")
+                + " " + shellQuote(home() + "/coomi"));
+        if (!directories.success) {
+            return "无法创建运行目录：" + directories.stdout;
+        }
+        CommandResult linkResult = execTermux(
+            "ln -sf " + shellQuote(binary.getAbsolutePath()) + " " + shellQuote(link.getAbsolutePath()));
+        if (!linkResult.success) {
+            return "无法链接引擎二进制：" + linkResult.stdout;
+        }
+        CommandResult version = execTermux("coomi --version");
+        if (!version.success || version.stdout.isEmpty()) {
+            return "引擎二进制无法执行：\n" + version.stdout + "\n" + version.stderr;
+        }
+        try (FileWriter writer = new FileWriter(CoomiConstants.INSTALL_MARKER_PATH)) {
+            writer.write(version.stdout.trim() + "\n" + binary.getAbsolutePath() + "\n");
+        } catch (Exception error) {
+            return "无法写入部署标记：" + error.getMessage();
+        }
+        Logger.logInfo(LOG_TAG, "Deployment repaired: " + version.stdout.trim());
+        return null;
+    }
+
     private boolean engineMatchesApk() {
         try {
             File versionFile = new File(CoomiConstants.COOMI_CONFIG_DIR, "engine.version");
@@ -432,6 +584,16 @@ public class CoomiService extends Service {
     private CommandResult startEngineSync() {
         mIsEngineStarting = true;
         try {
+            // 冷启动：本进程手里没有引擎句柄，但上一轮 App 进程留下的引擎/子进程
+            // 可能还在跑（引擎是独立进程，App 被系统杀掉后它变成孤儿）。不清就直接
+            // 再拉一个，两个引擎会抢同一份会话目录，失败重试又会再叠一层 —— 最后就是
+            // 「反复拉起引擎 → 堆积僵尸进程 → 引擎再也起不来」。
+            if (mEngineProcess == null) {
+                int purged = purgeStaleEngineProcesses();
+                if (purged > 0) {
+                    Logger.logInfo(LOG_TAG, "Cleaned " + purged + " leftover processes before starting engine");
+                }
+            }
             if (!engineMatchesApk()) {
                 Logger.logInfo(LOG_TAG, "Engine binary changed (APK updated), stopping stale engine");
                 stopEngineSync();
@@ -450,9 +612,12 @@ public class CoomiService extends Service {
                     stopEngineSync();
                 }
             }
-            if (!ensureNativeBinaryLinkCurrent() || !isDeployComplete()) {
+            // 部署自愈：marker 丢失 / 软链悬空都自动重建，而不是永久报 "not deployed"。
+            String repairError = repairDeploymentIfNeeded();
+            if (repairError != null) {
                 mIsEngineStarting = false;
-                return new CommandResult(false, "", "coomi-rs is not deployed", -1);
+                Logger.logError(LOG_TAG, "Deployment repair failed: " + repairError);
+                return new CommandResult(false, "", repairError, -1);
             }
             File binary = nativeBinary();
             File web = ensureCurrentWebAssets();
@@ -463,46 +628,74 @@ public class CoomiService extends Service {
                 return new CommandResult(false, "", "native binary or frontend is missing", -1);
             }
 
-            int port = findFreePort();
-            String token = generateToken();
-            mEngineToken = token;
-            String command = termuxEnvironment()
-                // 告诉引擎它的配置目录（也就是 .coomi），PoW 求解队列要用它定位。
-                + "export COOMI_HOME=" + shellQuote(CoomiConstants.COOMI_CONFIG_DIR) + "; "
-                + "export RUST_BACKTRACE=1; cd " + shellQuote(home()) + "; "
-                + "exec >>" + shellQuote(CoomiConstants.ENGINE_LOG_PATH) + " 2>&1; "
-                + "exec " + shellQuote(binary.getAbsolutePath())
-                + " --home " + shellQuote(CoomiConstants.COOMI_CONFIG_DIR)
-                + " --cwd " + shellQuote(home())
-                + " serve --port " + port
-                + " --token " + shellQuote(token)
-                + " --static-dir " + shellQuote(web.getAbsolutePath());
-            ProcessBuilder builder = new ProcessBuilder("/system/bin/sh", "-c", command);
-            builder.redirectErrorStream(true);
-            mEngineProcess = builder.start();
-            mEnginePort = port;
-            mIsEngineRunning = true;
-            // DeepSeek 验证码登录依赖官方 librscrypto.so 求解 PoW：
-            // 引擎把 challenge 写进 ~/.coomi/control/pow/，这个服务轮询并用原生库求解。
-            CoomiPowService.start(this);
-            startBundledRuntimeInstallWhenReady(mEngineProcess, port, token);
+            // 日志先轮转：长期升级使用后 coomi.log 可能上百 MB，追加写会变慢甚至写失败。
+            rotateEngineLogIfHuge();
 
-            Process process = mEngineProcess;
-            new Thread(() -> {
-                try {
-                    int code = process.waitFor();
-                    Logger.logInfo(LOG_TAG, "coomi-rs exited with code " + code);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } finally {
-                    if (mEngineProcess == process) {
-                        mEngineProcess = null;
-                        mIsEngineRunning = false;
-                    }
+            String lastFailure = "";
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                int port = findFreePort();
+                String token = generateToken();
+                mEngineToken = token;
+                String command = termuxEnvironment()
+                    // 告诉引擎它的配置目录（也就是 .coomi），PoW 求解队列要用它定位。
+                    + "export COOMI_HOME=" + shellQuote(CoomiConstants.COOMI_CONFIG_DIR) + "; "
+                    + "export RUST_BACKTRACE=1; cd " + shellQuote(home()) + "; "
+                    + "exec >>" + shellQuote(CoomiConstants.ENGINE_LOG_PATH) + " 2>&1; "
+                    + "exec " + shellQuote(binary.getAbsolutePath())
+                    + " --home " + shellQuote(CoomiConstants.COOMI_CONFIG_DIR)
+                    + " --cwd " + shellQuote(home())
+                    + " serve --port " + port
+                    + " --token " + shellQuote(token)
+                    + " --static-dir " + shellQuote(web.getAbsolutePath());
+                ProcessBuilder builder = new ProcessBuilder("/system/bin/sh", "-c", command);
+                builder.redirectErrorStream(true);
+                Process process = builder.start();
+                mEngineProcess = process;
+                mEnginePort = port;
+                mIsEngineRunning = true;
+
+                // 同步等健康：健康了才算启动成功，避免"报成功但引擎其实秒退"。
+                boolean healthy = waitForHealthy(process, port);
+                if (healthy) {
+                    // DeepSeek 验证码登录依赖官方 librscrypto.so 求解 PoW：
+                    // 引擎把 challenge 写进 ~/.coomi/control/pow/，这个服务轮询并用原生库求解。
+                    CoomiPowService.start(this);
+                    startBundledRuntimeInstallWhenReady(process, port, token);
+
+                    new Thread(() -> {
+                        try {
+                            int code = process.waitFor();
+                            Logger.logInfo(LOG_TAG, "coomi-rs exited with code " + code);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        } finally {
+                            if (mEngineProcess == process) {
+                                mEngineProcess = null;
+                                mIsEngineRunning = false;
+                            }
+                        }
+                    }, "coomi-rs-waiter").start();
+
+                    Logger.logInfo(LOG_TAG, "Engine healthy on port " + port);
+                    return new CommandResult(true, "Engine started on port " + port, "", 0);
                 }
-            }, "coomi-rs-waiter").start();
 
-            return new CommandResult(true, "Engine started on port " + port, "", 0);
+                // 不健康：抓日志尾部（这是用户报问题时唯一能看到的线索），清干净再试一次。
+                String detail = tailEngineLog(6_000);
+                boolean alive = process.isAlive();
+                Logger.logError(LOG_TAG, "Engine attempt " + attempt + " failed (alive=" + alive + ")");
+                lastFailure = (alive
+                    ? "引擎在 " + (ENGINE_START_WAIT_MS / 1000) + " 秒内没有响应健康检查"
+                    : "引擎进程启动后立即退出")
+                    + (detail.isEmpty() ? "" : "\n\n最近日志：\n" + detail);
+                stopEngineSync();
+                if (attempt == 1) {
+                    // 第二次尝试前再清一遍残留：第一次失败可能留下占着会话目录或端口的子进程。
+                    purgeStaleEngineProcesses();
+                }
+            }
+            mIsEngineStarting = false;
+            return new CommandResult(false, "", lastFailure, -1);
         } catch (Exception e) {
             mEngineProcess = null;
             mIsEngineRunning = false;
@@ -654,6 +847,90 @@ public class CoomiService extends Service {
         installThread.start();
     }
 
+    /**
+     * 按 cmdline 特征扫 /proc，给自己 UID 下的残留进程发信号。
+     *
+     * 为什么不用 pkill：Android 的 toybox 在不同版本上 pkill 行为不一致（有的只匹配
+     * 进程名，不认 -f 全文匹配），而 `/proc/<pid>/cmdline` 是稳定的。另外这里只看
+     * 本应用自己能看到的那部分 /proc（hidepid 生效时本来就只有自己 UID 的进程），
+     * 从根上避免误杀。
+     *
+     * @return 实际发出信号的进程数
+     */
+    private int sweepStaleProcesses(int signal) {
+        File[] entries = new File("/proc").listFiles();
+        if (entries == null) return 0;
+        int self = android.os.Process.myPid();
+        int signalled = 0;
+        for (File entry : entries) {
+            String name = entry.getName();
+            if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+            int pid;
+            try {
+                pid = Integer.parseInt(name);
+            } catch (NumberFormatException invalid) {
+                continue;
+            }
+            // pid 1 是 init，永远不能碰；自己更不用说。
+            if (pid <= 1 || pid == self) continue;
+            String cmdline = readCmdline(new File(entry, "cmdline"));
+            if (cmdline.isEmpty() || !matchesStaleProcess(cmdline)) continue;
+            try {
+                android.os.Process.sendSignal(pid, signal);
+                signalled++;
+            } catch (Exception ignored) {
+                // 进程可能刚好退出；没权限（不是本 UID）也走这里，跳过即可。
+            }
+        }
+        return signalled;
+    }
+
+    private static String readCmdline(File file) {
+        try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
+            byte[] buffer = new byte[2048];
+            int read = input.read(buffer);
+            if (read <= 0) return "";
+            // cmdline 用 NUL 分隔参数，拼成一行再匹配。
+            StringBuilder text = new StringBuilder(read);
+            for (int i = 0; i < read; i++) {
+                byte value = buffer[i];
+                text.append(value == 0 ? ' ' : (char) (value & 0xFF));
+            }
+            return text.toString().trim();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static boolean matchesStaleProcess(String cmdline) {
+        for (String marker : STALE_PROCESS_MARKERS) {
+            if (!marker.isEmpty() && cmdline.contains(marker)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 清理上一轮留下的引擎/运行时进程。
+     *
+     * 先 SIGTERM 让引擎有机会自己收拾工具子进程，再补 SIGKILL 清掉不听话的。
+     * 「暂停引擎」与「冷启动引擎」都会走这里：前者是用户点的，后者是防堆积的
+     * 自动动作 —— 反复拉起引擎最终会攒下一堆孤儿 proot 进程，把进程表吃光，
+     * 表现就是「引擎起不来」。
+     */
+    private int purgeStaleEngineProcesses() {
+        int signalled = sweepStaleProcesses(15);
+        if (signalled == 0) return 0;
+        try {
+            Thread.sleep(320);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        int forced = sweepStaleProcesses(9);
+        int total = signalled + forced;
+        Logger.logInfo(LOG_TAG, "Purged stale engine processes: term=" + signalled + " kill=" + forced);
+        return total;
+    }
+
     public void stopEngine(Consumer<CommandResult> callback) {
         mExecutor.execute(() -> {
             stopEngineSync();
@@ -675,6 +952,9 @@ public class CoomiService extends Service {
         try {
             execTermux("pkill -f '^/[^ ]*" + CoomiConstants.NATIVE_BINARY_NAME + "' 2>/dev/null; true");
         } catch (Exception ignored) { /* best-effort */ }
+        // 「暂停引擎」的同时把堆积清干净：引擎死了但它的 proot/工具子进程可能还活着，
+        // 反复暂停-启动就会越攒越多。
+        purgeStaleEngineProcesses();
         mEngineProcess = null;
         mIsEngineRunning = false;
         mIsEngineStarting = false;

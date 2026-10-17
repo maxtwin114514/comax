@@ -1,4 +1,4 @@
-# Coomi 反馈查询与统计指南
+# Comax 反馈查询与统计指南
 
 ## 1. 数据位置与安全
 
@@ -63,7 +63,7 @@ python scripts/analyze_coomi_feedback.py `
 ## 7. 下次直接执行提示词
 
 ```text
-请使用 F:\_WorkSpace\Projects\AILab\SSH-Agent\ssh-configs\ssh-8.148.146.68-2C2G-阿里云.txt 连接服务器，只读取 /www/wwwroot/updates.septemc.com/coomi/feedback。先阅读 F:\_WorkSpace\Projects\Coomi-Android\docs\coomi-feedback-guide.md，再运行 scripts/analyze_coomi_feedback.py 导出 CSV。不要输出、提交或记录 SSH 密码、管理员密码、API Key 和完整 IP。
+请使用 F:\_WorkSpace\Projects\AILab\SSH-Agent\ssh-configs\ssh-8.148.146.68-2C2G-阿里云.txt 连接服务器，只读取 /www/wwwroot/updates.septemc.com/coomi/feedback。先阅读 F:\_WorkSpace\Projects\Comax-Android\docs\coomi-feedback-guide.md，再运行 scripts/analyze_coomi_feedback.py 导出 CSV。不要输出、提交或记录 SSH 密码、管理员密码、API Key 和完整 IP。
 
 请给出：查询时间、JSON 总数、测试探针数、真实反馈数；按错误类别、App 版本、provider/model 的分布；最近 7 天趋势；高频消息聚类；带附件反馈数；五档推理强度的均轮命中（Token 加权）、均轮耗时、均轮用量，并将无缓存字段的记录显示为“暂无缓存数据”而不是 0%。结合上一轮基线指出新增、下降和仍未解决的问题，最后按 P0/P1/P2 输出可验证的迭代计划。除非我明确要求，不修改远端数据、服务或管理页。
 ```

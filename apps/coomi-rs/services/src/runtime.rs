@@ -267,7 +267,7 @@ pub struct LegacyTermuxBackend {
 }
 
 impl LegacyTermuxBackend {
-    /// Resolve the Termux bootstrap roots from Coomi's config directory.
+    /// Resolve the Termux bootstrap roots from Comax's config directory.
     /// Android launches the engine with COOMI_HOME at
     /// `<files>/home/.coomi`, while the bootstrap lives at `<files>/usr`.
     pub fn from_coomi_home(coomi_home: &Path) -> Self {
@@ -492,7 +492,7 @@ impl RuntimeBackend for ProotLinuxBackend {
                 let mut environment = minimal_environment(&home, &tmp);
                 // PRoot otherwise falls back to the compile-time Termux temp
                 // path (/data/data/com.termux/...), which does not exist in
-                // the standalone Coomi package.
+                // the standalone Comax package.
                 environment.insert(
                     "PROOT_TMP_DIR".into(),
                     tmp.to_string_lossy().into_owned(),
@@ -888,7 +888,7 @@ impl RuntimeManager {
         fs::create_dir_all(rootfs.join("etc"))?;
         fs::write(
             rootfs.join("etc").join("resolv.conf"),
-            "# Coomi guest DNS (rewritten at install time)\n\
+            "# Comax guest DNS (rewritten at install time)\n\
              nameserver 223.5.5.5\n\
              nameserver 119.29.29.29\n\
              nameserver 8.8.8.8\n",

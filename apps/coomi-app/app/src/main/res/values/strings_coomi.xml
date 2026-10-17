@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Coomi UI 文案（新版设计） -->
+<!-- Comax UI 文案（新版设计） -->
 <resources>
 
     <!-- ===== 启动引导 ===== -->
@@ -54,7 +54,7 @@
     <string name="coomi_install_phase_base_desc">解压 Termux bootstrap</string>
     <string name="coomi_install_phase_runtime">Rust 运行时</string>
     <string name="coomi_install_phase_runtime_desc">部署预编译 ARM64 原生二进制</string>
-    <string name="coomi_install_phase_engine">Coomi 引擎</string>
+    <string name="coomi_install_phase_engine">Comax 引擎</string>
     <string name="coomi_install_phase_engine_desc">校验 HTTP / WebSocket 引擎</string>
     <string name="coomi_install_log_label">部署日志</string>
     <string name="coomi_install_error_title">部署失败</string>
@@ -102,7 +102,7 @@
     <string name="coomi_provider_custom">自定义 / 兼容 OpenAI</string>
 
     <!-- ===== 仪表盘 ===== -->
-    <string name="coomi_dash_title">Coomi 控制台</string>
+    <string name="coomi_dash_title">Comax 控制台</string>
     <string name="coomi_dash_section_engine">引擎</string>
     <string name="coomi_dash_section_runtime">运行时</string>
     <string name="coomi_dash_section_tools">工具</string>
@@ -113,7 +113,7 @@
     <string name="coomi_dash_collab_desc">并行拆解任务，查看成员执行流与交付产物</string>
     <string name="coomi_dash_phone_assistant">手机助手</string>
     <string name="coomi_dash_phone_assistant_desc">设为系统默认助理，通过语音调用 Comax 控制手机</string>
-    <string name="coomi_dash_open_chat_desc">Coomi 的主界面</string>
+    <string name="coomi_dash_open_chat_desc">Comax 的主界面</string>
     <string name="coomi_dash_restart">重启引擎</string>
     <string name="coomi_dash_stop">停止引擎</string>
     <string name="coomi_dash_runtime">运行时</string>
@@ -130,15 +130,15 @@
     <string name="coomi_dash_hooks">自定义钩子（实验）</string>
     <string name="coomi_dash_hooks_desc">在会话和工具调用前后执行自定义命令</string>
     <string name="coomi_dash_memory">持久记忆</string>
-    <string name="coomi_dash_memory_desc">编辑 Coomi 内建记忆、范围和命中信息</string>
+    <string name="coomi_dash_memory_desc">编辑 Comax 内建记忆、范围和命中信息</string>
     <string name="coomi_dash_life">数字生命体（实验）</string>
-    <string name="coomi_dash_life_desc">安装、觉醒并启用 Coomi Life</string>
+    <string name="coomi_dash_life_desc">安装、觉醒并启用 Comax Life</string>
     <string name="coomi_dash_files">文件管理</string>
     <string name="coomi_dash_files_desc">浏览独立环境，管理项目文件</string>
     <string name="coomi_dash_env_settings">ProotLinux 环境</string>
     <string name="coomi_dash_env_settings_desc">内置并自动管理隔离 Linux 运行时</string>
     <string name="coomi_dash_check_update">检查更新</string>
-    <string name="coomi_dash_check_update_desc">当前版本 Coomi-Android %1$s</string>
+    <string name="coomi_dash_check_update_desc">当前版本 Comax-Android %1$s</string>
     <string name="coomi_dash_custom_iteration">自定义迭代（实验）</string>
     <string name="coomi_dash_custom_iteration_desc">全面自定义自己的CoomiDev</string>
     <string name="coomi_dash_home_settings">启动首页</string>
@@ -155,7 +155,7 @@
     <string name="coomi_home_console">控制台</string>
     <string name="coomi_home_console_desc">先看引擎状态与各功能入口</string>
     <string name="coomi_home_chat">对话</string>
-    <string name="coomi_home_chat_desc">直接进入 Coomi 对话界面</string>
+    <string name="coomi_home_chat_desc">直接进入 Comax 对话界面</string>
     <string name="coomi_home_saved">已保存</string>
     <string name="coomi_dash_backup">备份与导入</string>
     <string name="coomi_dash_backup_desc">完整备份会话、永久统计、MCP 与 Skill</string>
@@ -197,9 +197,9 @@
     <string name="coomi_backup_title">备份与导入</string>
     <string name="coomi_backup_back">返回</string>
     <string name="coomi_backup_action">备份数据</string>
-    <string name="coomi_backup_action_desc">导出数据文件、Coomi 配置、完整 MCP 与 Skill；不包含运行环境和缓存</string>
+    <string name="coomi_backup_action_desc">导出数据文件、Comax 配置、完整 MCP 与 Skill；不包含运行环境和缓存</string>
     <string name="coomi_backup_import">导入备份</string>
-    <string name="coomi_backup_import_desc">选择备份压缩包（.zip），恢复完整 Coomi 数据与拓展文件</string>
+    <string name="coomi_backup_import_desc">选择备份压缩包（.zip），恢复完整 Comax 数据与拓展文件</string>
     <string name="coomi_backup_hint">提示：备份包含提供商配置和本地拓展实现，可能含敏感数据，请妥善保管备份文件。</string>
     <string name="coomi_backup_importing">正在导入备份…</string>
     <string name="coomi_backup_import_done">导入完成</string>
@@ -220,7 +220,8 @@
 
     <!-- ===== 系统默认手机助手 ===== -->
     <string name="coomi_assistant_title">手机助手</string>
-    <string name="coomi_assistant_summary">依次设置默认助理、麦克风和语音识别模型。长按电源键能否唤醒默认助理由手机系统决定。</string>
+    <string name="coomi_assistant_summary">依次设置默认助理、麦克风和语音识别模型。开启无障碍后可接管电源键：按 0.5 秒唤醒助手，继续按到 3 秒才弹出关机/重启菜单，短按仍是关屏。部分把电源键攥在系统手里的机型（如部分 HyperOS）可能无响应，可用下面的开关关掉，恢复原生行为。</string>
+    <string name="coomi_assistant_long_press">接管电源键：0.5 秒唤醒助手，按到 3 秒才出关机菜单</string>
     <string name="coomi_assistant_ready_summary">手机助手已就绪。系统唤醒 Comax 后会显示顶部语音胶囊，并把识别结果交给控制模式执行。</string>
     <string name="coomi_assistant_section_permissions">系统接管与权限</string>
     <string name="coomi_assistant_section_speech">语音识别</string>
@@ -287,7 +288,7 @@
     <string name="coomi_appearance_orange_desc">白色底面与橙色强调</string>
     <string name="coomi_terms_consent">同意《用户协议》和《用户隐私政策》</string>
     <string name="coomi_user_agreement_title">用户协议</string>
-    <string name="coomi_user_agreement_body">使用 Coomi 即表示您授权其按您的指令在本机执行操作。请审慎确认高风险操作并遵守适用法律。软件按现状提供，重要数据请自行备份。</string>
+    <string name="coomi_user_agreement_body">使用 Comax 即表示您授权其按您的指令在本机执行操作。请审慎确认高风险操作并遵守适用法律。软件按现状提供，重要数据请自行备份。</string>
     <string name="coomi_privacy_policy_title">用户隐私政策</string>
     <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求与您主动使用的语音转写会发送给所配置的服务商。应用不再上报版本日活；错误反馈仅在您确认后上传脱敏诊断。</string>
 </resources>

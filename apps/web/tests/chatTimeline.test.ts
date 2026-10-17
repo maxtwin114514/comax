@@ -20,20 +20,32 @@ function tool(callId: string, images?: string[]): ToolCard {
   }
 }
 
-test('groups consecutive tool cards without losing stable timeline keys', () => {
+test('folds one process run (thinking + tools + narration) into a single block', () => {
   const items: Timelineitem[] = [
     { kind: 'user', id: 'u1', content: 'start' },
+    { kind: 'reasoning', id: 'r1', content: '想一下', expanded: false },
     tool('t1'),
     tool('t2'),
-    { kind: 'assistant', id: 'a1', content: 'done', streaming: false },
+    { kind: 'assistant', id: 'a1', content: '先看看文件', streaming: false },
+    { kind: 'reasoning', id: 'r2', content: '再看看', expanded: false },
     tool('t3'),
+    { kind: 'assistant', id: 'a2', content: 'done', streaming: false },
   ]
 
   const blocks = buildTimelineBlocks(items)
-  assert.deepEqual(blocks.map(block => block.key), ['user:u1', 'g:t1', 'assistant:a1', 'g:t3'])
-  assert.equal(blocks[1].t, 'tools')
-  assert.deepEqual(blocks[1].t === 'tools' ? blocks[1].cards.map(card => card.callId) : [], ['t1', 't2'])
-  assert.equal(blocks[3].t === 'tools' ? blocks[3].cards[0] : null, items[4])
+  // user 独立成块；整段过程折叠成一个过程块
+  assert.deepEqual(blocks.map(block => block.key), ['user:u1', 'p:r1'])
+  const process = blocks[1]
+  assert.equal(process.t, 'process')
+  if (process.t !== 'process') return
+  // 最后一条正文作为回答留在折叠块外
+  assert.equal(process.block.answer, items[7])
+  // 两段思考、两组工具、一段中间叙述
+  assert.deepEqual(process.block.stages.map(stage => stage.s), ['reasoning', 'tools', 'text', 'reasoning', 'tools'])
+  const firstTools = process.block.stages[1]
+  assert.deepEqual(firstTools.s === 'tools' ? firstTools.cards.map(card => card.callId) : [], ['t1', 't2'])
+  // 结构没变时必须复用同一个对象：虚拟列表靠它避免整条重排
+  assert.equal(buildTimelineBlocks(items)[1], process)
 })
 
 test('builds a 5,000-item variable-height timeline without truncating content', () => {
@@ -48,19 +60,19 @@ test('builds a 5,000-item variable-height timeline without truncating content', 
 
   const blocks = buildTimelineBlocks(items)
   assert.equal(items.length, 5_000)
-  assert.equal(blocks.length, 4_999)
-  const markdownBlock = blocks[4_997]
-  assert.equal(
-    markdownBlock.t === 'one' && markdownBlock.item.kind === 'assistant'
-      ? markdownBlock.item.content
-      : '',
-    longMarkdown,
-  )
+  // 4.997 条 user/assistant 交替 → 4.997 块；末尾 long + 两张图自成一块
+  assert.equal(blocks.length, 4_998)
   const finalBlock = blocks.at(-1)
+  assert.equal(finalBlock?.t, 'process')
+  if (finalBlock?.t !== 'process') return
   assert.deepEqual(
-    finalBlock?.t === 'tools' ? finalBlock.cards.flatMap(card => card.images ?? []) : [],
+    finalBlock.block.stages.flatMap(stage => (stage.s === 'tools' ? stage.cards.flatMap(card => card.images ?? []) : [])),
     [image, image],
   )
+  // 这一轮以工具调用收尾，没有「最终正文」，长文本作为过程叙述留在折叠块里
+  assert.equal(finalBlock.block.answer, null)
+  const narration = finalBlock.block.stages.find(stage => stage.s === 'text')
+  assert.equal(narration?.s === 'text' ? narration.item.content : '', longMarkdown)
 })
 
 test('session fallback persistence keeps the newest bounded transcript intact', () => {

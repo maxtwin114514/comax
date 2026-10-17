@@ -44,6 +44,7 @@ public final class CoomiAssistantSetupActivity extends Activity {
     private EditText languageInput;
     private Switch fallbackSwitch;
     private Switch enabledSwitch;
+    private Switch longPressSwitch;
     private TextView summary;
     private TextView roleStatus;
     private TextView micStatus;
@@ -78,6 +79,7 @@ public final class CoomiAssistantSetupActivity extends Activity {
         languageInput = findViewById(R.id.input_assistant_language);
         fallbackSwitch = findViewById(R.id.switch_assistant_system_fallback);
         enabledSwitch = findViewById(R.id.switch_assistant_enabled);
+        longPressSwitch = findViewById(R.id.switch_assistant_long_press);
 
         roleButton.setOnClickListener(view -> requestAssistantRole());
         micButton.setOnClickListener(view -> requestMic());
@@ -93,6 +95,7 @@ public final class CoomiAssistantSetupActivity extends Activity {
         languageInput.setText(store.language());
         fallbackSwitch.setChecked(store.useSystemFallback());
         enabledSwitch.setChecked(store.isEnabled());
+        longPressSwitch.setChecked(store.wakeOnLongPress());
     }
 
     @Override protected void onResume() {
@@ -180,6 +183,7 @@ public final class CoomiAssistantSetupActivity extends Activity {
         }
         store.saveSpeech(provider, model, languageInput.getText().toString(), fallbackSwitch.isChecked());
         store.setEnabled(enabledSwitch.isChecked());
+        store.setWakeOnLongPress(longPressSwitch.isChecked());
         Toast.makeText(this, R.string.coomi_assistant_saved, Toast.LENGTH_SHORT).show();
         refreshStatus();
     }

@@ -193,7 +193,7 @@ function goDashboard() {
       </button>
 
       <p class="note">
-        ProotLinux 是 Coomi 的必备内置环境，由 Runtime V2 在 App 私有存储中自动校验和初始化，
+        ProotLinux 是 Comax 的必备内置环境，由 Runtime V2 在 App 私有存储中自动校验和初始化，
         无需手动安装或联网下载。首次解包会花一点时间，后续更新、修复和回滚均保留持久状态。
       </p>
     </main>

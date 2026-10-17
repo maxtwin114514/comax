@@ -248,7 +248,7 @@ impl AgentScheduler {
             .map(|entry| format!(" Your configured role is: {}.", entry.description))
             .unwrap_or_default();
         Agent::new(format!(
-            "{}\n\nYou are a delegated Coomi sub-agent.{role} Complete the assigned task independently and return a concise result to the parent agent.",
+            "{}\n\nYou are a delegated Comax sub-agent.{role} Complete the assigned task independently and return a concise result to the parent agent.",
             self.system_prompt
         ))
         .run_turn(

@@ -5,12 +5,16 @@
   canRetrieveWindowContent：读界面结构，用于按文字定位输入框和发送按钮（而不是盲点坐标）。
   canPerformGestures：API 24+ 的手势分发，用于点击与滑动。
   事件只收窗口状态与内容变化，够判断前台包名和聊天页就够了，不做全量监听。
+  canRequestFilterKeyEvents：手机助手的「长按电源键 0.5 秒唤醒」要靠按键过滤才可能实现
+  （第三方应用没有别的合法入口）。短按一律放行，绝不吞电源键；ROM 不给这个能力时
+  这个声明无效，其它功能不受影响。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagRequestFilterKeyEvents"
     android:canPerformGestures="true"
+    android:canRequestFilterKeyEvents="true"
     android:canRetrieveWindowContent="true"
     android:description="@string/coomi_accessibility_description"
     android:notificationTimeout="80"

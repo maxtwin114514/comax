@@ -1,5 +1,5 @@
 /*
-  Coomi 设计令牌 —— 蓝 (#2d61c6) + 白为主色，橙 (#d47458) 作点缀。
+  Comax 设计令牌 —— 蓝 (#2d61c6) + 白为主色，橙 (#d47458) 作点缀。
   排版语言参考 DeepSeek 移动端：大面积白底、浅灰填充块、16px 卡片圆角、
   全圆药丸、细描线图标、"浅蓝底 + 蓝字"表达选中态。
   色值与 Android 侧 res/values/colors_coomi.xml 对齐，跨 WebView 边界不跳色。
@@ -58,6 +58,12 @@
     "HarmonyOS Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
+  /* ── 主题化文字角色 ──
+     默认值刻意等于各组件原本用的色，所以非终端主题下完全不改变观感；
+     「终端」主题再按自己的规矩覆盖这三项（思考 / 正文输出 / 工具调用）。 */
+  --term-think: var(--text-2);
+  --term-output: var(--text);
+  --term-tool: var(--text-2);
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -237,6 +243,65 @@
   --orange: #b66b4e; --orange-soft: #f4e8e2; --orange-border: #ddbeb1;
   --bg-card: #fffefa; --bg-input: #f4f2ed; --bg-elevated: #fffefa; --user-bubble: #4f607f;
 }
+
+/* ══════════════════════════════════════════════════════════════
+   终端主题（两版：黑 / 白）
+   ──────────────────────────────────────────────────────────────
+   规矩只有一条：所有字体换成等宽终端字体；然后按版别分配三个文字角色 ——
+     · 黑版：思考过程 = 白，正文输出 = 橙，工具调用 = 橙
+     · 白版：一律黑字
+   圆角收窄、阴影去掉，让界面更像一块终端，而不是手机 App。
+   ══════════════════════════════════════════════════════════════ */
+:root[data-theme='terminal-dark'],
+:root[data-theme='terminal-light'] {
+  /* 所有字体 = 等宽：标题、正文、按钮、输入框全部继承这一条 */
+  --font-ui: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "DejaVu Sans Mono", monospace;
+  --r-card: 6px; --r-md: 5px; --r-sm: 4px;
+  --shadow-1: none; --shadow-2: none; --shadow-sheet: none; --shadow-drawer: none;
+  /* 终端里字距略放开一点，等宽字体太挤会糊成一片 */
+  letter-spacing: .01em;
+}
+/* 等宽字体下标题/按钮的字重需要压一档，否则比正文还显眼 */
+:root[data-theme='terminal-dark'] .rmain,
+:root[data-theme='terminal-light'] .rmain { font-weight: 600; }
+
+/* ── 黑版 ── */
+:root[data-theme='terminal-dark'] {
+  color-scheme: dark;
+  --bg: #0b0d0f; --page: #07090a; --fill: #12161a; --fill-strong: #1a1f25; --fill-press: #232a31;
+  --border: #232a31; --border-strong: #313a43;
+  --text: #e8edf2; --text-2: #9fb0be; --text-3: #64757f;
+  --blue: #ff9d3d; --blue-press: #e8871f; --blue-soft: #2a1d10; --blue-soft-2: #3a2814; --blue-border: #6b4718;
+  --orange: #ff9d3d; --orange-soft: #2a1d10; --orange-border: #6b4718;
+  --ok: #4ee39a; --ok-soft: #10281d; --warn: #ffd166; --warn-soft: #2a2413;
+  --danger: #ff6b6b; --danger-soft: #2c1517; --danger-border: #6b2b2b;
+  --code-bg: #12161a; --code-text: #cfe3f0; --code-bg-dark: #07090a;
+  --bg-card: #0b0d0f; --bg-input: #12161a; --bg-elevated: #12161a;
+  --user-bubble: #1a1f25; --user-text: #e8edf2;
+  /* 三个文字角色：思考 = 白，输出与工具 = 橙 */
+  --term-think: #ffffff;
+  --term-output: #ff9d3d;
+  --term-tool: #ff9d3d;
+}
+/* ── 白版 ── */
+:root[data-theme='terminal-light'] {
+  color-scheme: light;
+  --bg: #ffffff; --page: #f2f2f2; --fill: #f5f5f5; --fill-strong: #ebebeb; --fill-press: #e0e0e0;
+  --border: #dcdcdc; --border-strong: #c4c4c4;
+  --text: #000000; --text-2: #1a1a1a; --text-3: #5a5a5a;
+  --blue: #000000; --blue-press: #333333; --blue-soft: #ececec; --blue-soft-2: #e0e0e0; --blue-border: #bdbdbd;
+  --orange: #000000; --orange-soft: #ececec; --orange-border: #bdbdbd;
+  --ok: #1a6b3c; --ok-soft: #e8f2ec; --warn: #7a5a00; --warn-soft: #f7f2e0;
+  --danger: #b3261e; --danger-soft: #fbeae8; --danger-border: #e0b4b0;
+  --code-bg: #f5f5f5; --code-text: #000000; --code-bg-dark: #ebebeb;
+  --bg-card: #ffffff; --bg-input: #f5f5f5; --bg-elevated: #ffffff;
+  --user-bubble: #ebebeb; --user-text: #000000;
+  /* 白版一律黑字 */
+  --term-think: #000000;
+  --term-output: #000000;
+  --term-tool: #000000;
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 /* 点击不出现蓝色高亮方块：WebView 的 tap highlight / focus ring 全部去掉，
    交互反馈交给各组件自己的 :active 样式。 */
@@ -382,7 +447,7 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
 @keyframes card-tracer-orbit { to { stroke-dashoffset:-100; } }
 
 /* ── Markdown 正文 ── */
-.md { font-size: 15.5px; line-height: 1.72; word-break: break-word; }
+.md { font-size: 15.5px; line-height: 1.72; word-break: break-word; color: var(--term-output); }
 .md :first-child { margin-top: 0; }
 .md :last-child { margin-bottom: 0; }
 .md p { margin: 0.55em 0; }
@@ -425,3 +490,55 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
 .minimal-ui .tool .target { font-size: 10.5px; }
 .minimal-ui .tool-body { font-size: 10px; }
 .minimal-ui .card-out { font-size: 12.4px; }
+
+/* ══════════════════════════════════════════════════════════════
+   桌面浏览器布局（云端访问的主要场景）
+   ──────────────────────────────────────────────────────────────
+   标记由 main.ts 写在 <html data-desktop>：宽屏 + 精确指针才算桌面。
+   手机竖屏与窄窗口一律走原来的手机排版，这里只处理"真的在电脑上打开"。
+
+   手机排版把内容压成一条竖线是对的（屏幕就那么大），但在 1400px 的屏幕上
+   会让对话挤在中间一小条、两侧大片空白，读长文很累。所以：
+     · 会话内容放宽到接近阅读舒适的 760px；
+     · 输入区跟着一起放宽并对齐，避免"内容宽、输入窄"的错位；
+     · 悬浮按钮、抽屉这类为拇指设计的东西在大屏上换到更自然的位置。
+   ══════════════════════════════════════════════════════════════ */
+@media (min-width: 900px) {
+  html[data-desktop='true'] .virtual-stream,
+  html[data-desktop='true'] .inner {
+    padding-left: max(24px, calc((100% - 760px) / 2));
+    padding-right: max(24px, calc((100% - 760px) / 2));
+  }
+  /* 输入区与内容同宽对齐 */
+  html[data-desktop='true'] .composer > .field,
+  html[data-desktop='true'] .sbar {
+    max-width: 760px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  /* 回到顶部/底部这类浮动按钮贴着正文右缘，而不是屏幕右缘 */
+  html[data-desktop='true'] .to-bottom {
+    left: auto;
+    right: max(18px, calc((100% - 760px) / 2 - 56px));
+    margin-left: 0;
+  }
+  /* 侧栏是底图：大屏上给它一个更像导航栏的宽度（与 --drawer-w 同一个值） */
+  html[data-desktop='true'] .drawer-root .panel {
+    border-right: 1px solid var(--border);
+  }
+  /* 大屏上侧栏宽度固定，卡片位移也跟着它是这个值（.chat 上的 --drawer-w 会继承） */
+  html[data-desktop='true'] .chat { --drawer-w: 320px; }
+  html[data-desktop='true'] .chat.pushed { perspective: 2600px; }
+  /* 3D 侧翻在大屏上用更小的角度：转太多会露出大片空白 */
+  html[data-desktop='true'] .shell.pushed {
+    transform: translateX(var(--drawer-w)) rotateY(9deg) scale(.97);
+  }
+  /* 悬浮球在大屏上没意义（那是给手机切 App 时看的） */
+  html[data-desktop='true'] .coomi-float-ball { display: none; }
+  /* 长按选中文本是桌面阅读的刚需，别被全局禁选挡掉 */
+  html[data-desktop='true'] .md,
+  html[data-desktop='true'] .md * {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}

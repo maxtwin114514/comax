@@ -313,7 +313,7 @@ function backToProviders() {
       <div class="zhipu-hero">
         <CoomiIcon name="sparkle" :size="28" />
         <h2>智谱 GLM Coding</h2>
-        <p>接入智谱账号或 API Key，在 Coomi 中使用 GLM Coding 系列模型。</p>
+        <p>接入智谱账号或 API Key，在 Comax 中使用 GLM Coding 系列模型。</p>
       </div>
 
       <div class="tabs" role="tablist">

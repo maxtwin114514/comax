@@ -319,6 +319,52 @@ pub fn retained_user_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     retained
 }
 
+/// 单条工具结果超过这个字符数就裁中段（对齐 DeepSeek Harness `standard` 预设
+/// 的 `tool-result-pruner`：thresholdChars 8192 / headChars 4096 / tailChars 1024）。
+pub const PRUNE_THRESHOLD_CHARS: usize = 8_192;
+pub const PRUNE_HEAD_CHARS: usize = 4_096;
+pub const PRUNE_TAIL_CHARS: usize = 1_024;
+
+fn take_chars(value: &str, count: usize) -> String {
+    value.chars().take(count).collect()
+}
+
+fn take_last_chars(value: &str, count: usize) -> String {
+    let mut chars = value.chars().rev().take(count).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+/// 把超长工具结果裁成「头 + 中段省略标记 + 尾」，只影响**发给模型的请求副本**。
+///
+/// 为什么不沿用 trim_history_to_fit 的做法：那里一超限就把**所有**工具输出抹成
+/// 一句 "output truncated"，一个 10 万字的大文件读取会把整段历史的工具证据一起
+/// 毁掉，模型后面就再也看不到「刚才到底看到了什么」。
+/// 上游 standard 预设的做法是按条裁中段、保留首尾：既省 token，又留下关键证据
+/// （命令开头、报错结尾通常在tail 里）。
+///
+/// 幂等：裁完的长度约 head + tail + 标记，必然低于阈值，重复调用不会再退化。
+pub fn prune_oversized_tool_results(messages: &mut [ChatMessage]) -> usize {
+    let mut pruned = 0;
+    for message in messages.iter_mut() {
+        if message.role != Role::Tool || message.compaction_summary || message.internal {
+            continue;
+        }
+        let length = message.content.chars().count();
+        if length <= PRUNE_THRESHOLD_CHARS {
+            continue;
+        }
+        let head = take_chars(&message.content, PRUNE_HEAD_CHARS);
+        let tail = take_last_chars(&message.content, PRUNE_TAIL_CHARS);
+        message.content = format!(
+            "{head}\n\n...[工具输出共 {length} 字，中段 {} 字已省略]...\n\n{tail}",
+            length.saturating_sub(PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS),
+        );
+        pruned += 1;
+    }
+    pruned
+}
+
 pub fn trim_history_to_fit(
     system_prompt: &str,
     messages: &mut Vec<ChatMessage>,
@@ -381,6 +427,25 @@ mod tests {
     use super::*;
     use crate::ToolCall;
     use serde_json::json;
+
+    #[test]
+    fn oversized_tool_results_keep_head_and_tail() {
+        let huge = format!("{}{}{}", "头".repeat(5_000), "中".repeat(50_000), "尾".repeat(2_000));
+        let mut messages = vec![
+            ChatMessage::tool("call-1", huge),
+            ChatMessage::tool("call-2", "short output"),
+        ];
+        assert_eq!(prune_oversized_tool_results(&mut messages), 1);
+        let pruned = &messages[0].content;
+        assert!(pruned.starts_with(&"头".repeat(10)), "头部证据必须保住");
+        assert!(pruned.ends_with(&"尾".repeat(10)), "尾部的报错/结尾必须保住");
+        assert!(pruned.contains("中段"));
+        assert!(pruned.chars().count() < PRUNE_THRESHOLD_CHARS);
+        // 幂等：再跑一次不会继续退化
+        assert_eq!(prune_oversized_tool_results(&mut messages), 0);
+        // 未超长的工具结果一字不动
+        assert_eq!(messages[1].content, "short output");
+    }
 
     #[test]
     fn normalization_pairs_calls_and_drops_orphans() {

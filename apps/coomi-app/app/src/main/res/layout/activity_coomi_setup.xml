@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Coomi 安装向导外壳：顶部步骤指示 + ViewPager2 + 底部导航条。
+    Comax 安装向导外壳：顶部步骤指示 + ViewPager2 + 底部导航条。
     setup_viewpager / setup_nav_bar / btn_setup_back / btn_setup_next 由 Java 引用。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

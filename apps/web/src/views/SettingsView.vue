@@ -235,7 +235,7 @@ onMounted(async () => {
           <span class="ri" :class="{ on: config.globalMemory }"><CoomiIcon name="clock" :size="17" /></span>
           <span class="rt">
             <span class="rmain">全局会话记忆</span>
-            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || (config.globalMemory ? '开启后 Coomi 可读取所有历史会话文件' : '全局会话记忆已关闭：Coomi 无法读取任何历史会话') }}</span>
+            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || (config.globalMemory ? '开启后 Comax 可读取所有历史会话文件' : '全局会话记忆已关闭：Comax 无法读取任何历史会话') }}</span>
           </span>
           <span class="sw" :class="{ on: config.globalMemory }" />
         </button>
@@ -325,6 +325,20 @@ onMounted(async () => {
             <span class="rmain">定制身份定位</span>
             <span class="rsub">{{ config.customPrompt.trim() ? '已配置，置于系统提示词最前生效' : '未设置。让 AI 认知自己的身份与定位' }}</span>
           </span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
+      </div>
+
+      <p class="sec-label">远程</p>
+      <div class="group">
+        <button class="row" @click="router.push('/cloud')">
+          <span class="ri"><CoomiIcon name="globe" :size="17" /></span>
+          <span class="rt"><span class="rmain">云端访问</span><span class="rsub">在外面用浏览器查看并继续手机上的会话</span></span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
+        <button class="row" @click="router.push('/updates')">
+          <span class="ri"><CoomiIcon name="arrowDown" :size="17" /></span>
+          <span class="rt"><span class="rmain">检查更新</span><span class="rsub">更新源、关闭启动时的更新提醒</span></span>
           <CoomiIcon name="chevronRight" :size="15" class="arw" />
         </button>
       </div>

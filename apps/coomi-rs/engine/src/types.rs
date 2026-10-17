@@ -116,6 +116,11 @@ pub struct ChatMessage {
     pub provider_items: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageContent>,
+    /// 本轮输出的思考过程（reasoning / thinking）。只用于界面回放：
+    /// 引擎落盘时一起写进会话文件，重进会话仍能看到思考过程；
+    /// 组装上游请求时不会带上它（provider 侧只读 content / tool_calls）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
 }
 
 const fn is_false(value: &bool) -> bool {
@@ -147,6 +152,7 @@ impl ChatMessage {
             life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
+            reasoning: String::new(),
         }
     }
 
@@ -162,6 +168,7 @@ impl ChatMessage {
             life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
+            reasoning: String::new(),
         }
     }
 
@@ -177,6 +184,7 @@ impl ChatMessage {
             life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
+            reasoning: String::new(),
         }
     }
 
@@ -357,7 +365,7 @@ pub struct ModelRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
     pub reasoning_effort: Option<String>,
-    /// 上游可用于路由与提示词缓存的稳定 Coomi 会话标识。
+    /// 上游可用于路由与提示词缓存的稳定 Comax 会话标识。
     pub session_id: Option<String>,
     /// DeepSeek 账号：是否开启联网搜索（网页版开关）。
     pub search_enabled: bool,
@@ -634,7 +642,7 @@ pub struct UserInputRequest {
 pub type UserInputResponse = BTreeMap<String, String>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Workflow 可编排多步骤执行（作为 Coomi 拓展能力，落点在 .coomi/workflows/<id>/）
+// Workflow 可编排多步骤执行（作为 Comax 拓展能力，落点在 .coomi/workflows/<id>/）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 单个步骤可绑定的执行能力（混合声明式）。
@@ -1015,6 +1023,13 @@ pub enum AgentEvent {
         automatic: bool,
         before_tokens: u64,
         after_tokens: u64,
+        /// 本次压缩写进历史的摘要正文。
+        ///
+        /// 由引擎随事件下发，UI 才能在「压缩刚发生」时就把摘要摆给用户看。
+        /// 否则前端只能等下次从磁盘恢复历史时，靠扫描 compaction_summary 标记
+        /// 反推出「这里曾经压缩过」—— 那就变成了「重进会话才弹出压缩摘要」，
+        /// 而真正需要它的当下反而什么都没有。
+        summary: String,
     },
     PlanUpdated(PlanState),
     LoopUpdated(LoopState),

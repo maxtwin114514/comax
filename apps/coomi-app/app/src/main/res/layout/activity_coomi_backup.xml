@@ -1,5 +1,5 @@
 <!--
-    Coomi 备份与导入二级页面：CoomiBackupActivity。
+    Comax 备份与导入二级页面：CoomiBackupActivity。
     提供「备份数据」与「导入备份」两个入口，风格与 Dashboard 一致。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

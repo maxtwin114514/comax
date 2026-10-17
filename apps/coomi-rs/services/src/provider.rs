@@ -170,9 +170,9 @@ impl HttpModelProvider {
         state.finish()
     }
 
-    /// DeepSeek 账号端点不是 OpenAI 协议。这里把 Coomi 历史折叠成官方 prompt，
+    /// DeepSeek 账号端点不是 OpenAI 协议。这里把 Comax 历史折叠成官方 prompt，
     /// 自动创建会话、计算 PoW，并读取官方 SSE；工具定义以文本协议附在 prompt 中，
-    /// 模型仍可按 Coomi 的工具调用约定返回 JSON。
+    /// 模型仍可按 Comax 的工具调用约定返回 JSON。
     async fn deepseek_account(
         &self,
         request: ModelRequest,
@@ -283,7 +283,7 @@ impl HttpModelProvider {
         }
         // DeepSeek 账号协议没有 OpenAI tool_calls 字段。Agent 提示词要求模型用
         // JSON 描述工具调用，因此在协议边界把它还原成标准 ToolCall，后续仍走
-        // Coomi 原有的权限、工具执行和事件动画链。
+        // Comax 原有的权限、工具执行和事件动画链。
         let tool_calls = parse_deepseek_tool_call(&content).into_iter().collect();
         Ok(ModelResponse {
             content,
@@ -607,7 +607,7 @@ impl HttpModelProvider {
                 .header("X-Client-Timezone", "Asia/Shanghai")
                 .header("X-Os-Category", "android")
                 .header("X-Device-Mid", "coomi-android-0001")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Coomi) AppleWebKit/537.36");
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Comax) AppleWebKit/537.36");
         }
         // 附加用户配置的自定义请求头（如 ZCode 验证码 X-Aliyun-Captcha-Verify-Param）
         for (name, value) in &self.config.extra_headers {
@@ -2571,10 +2571,22 @@ mod tests {
         ];
         let rendered = openai_messages(&messages, false).expect("render messages");
         assert_eq!(rendered[0]["role"], "assistant");
+        // 关键不变量：工具结果必须**紧挨着**请求它的助手轮次。
+        // 上游要的是这个邻接关系，不是"id 在历史里某处出现过"。
         assert_eq!(rendered[1]["role"], "tool");
         assert_eq!(rendered[1]["tool_call_id"], "call-1");
+        assert!(
+            rendered[1]["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("aborted")),
+            "没有结果的调用要补一条终止记录，不能留悬空 tool_call",
+        );
+        // 内部上下文消息被推迟到工具行之后：它可以排在工具结果后面，
+        // 但绝不能插在助手轮次和工具结果之间（那样就破坏了上面的邻接关系）。
         assert_eq!(rendered[2]["role"], "user");
-        assert_eq!(rendered[2]["content"], "下一条任务");
+        assert_eq!(rendered[2]["content"], "工具正在处理");
+        assert_eq!(rendered[3]["role"], "user");
+        assert_eq!(rendered[3]["content"], "下一条任务");
     }
 
     #[test]

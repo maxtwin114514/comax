@@ -10,11 +10,11 @@ s = s.replace('<string name="coomi_launcher_autostart_desc">开机自动拉起�
 s = s.replace('<string name="coomi_root_title">Root 权限（可选）</string>',
               '<string name="coomi_root_title">Root 权限（可选）</string>', 1)
 # 找 root/shizuku desc 原文
-if '允许 Coomi 执行明确的 Root 操作以增强能力；未授权也不影响正常使用' in s:
-    s = s.replace('允许 Coomi 执行明确的 Root 操作以增强能力；未授权也不影响正常使用',
+if '允许 Comax 执行明确的 Root 操作以增强能力；未授权也不影响正常使用' in s:
+    s = s.replace('允许 Comax 执行明确的 Root 操作以增强能力；未授权也不影响正常使用',
                   '允许执行 Root 增强操作，未授权不影响使用', 1)
-if '允许 Coomi 通过 Shizuku 执行受控系统操作；未授权也不影响正常使用' in s:
-    s = s.replace('允许 Coomi 通过 Shizuku 执行受控系统操作；未授权也不影响正常使用',
+if '允许 Comax 通过 Shizuku 执行受控系统操作；未授权也不影响正常使用' in s:
+    s = s.replace('允许 Comax 通过 Shizuku 执行受控系统操作；未授权也不影响正常使用',
                   '允许执行受控系统操作，未授权不影响使用', 1)
 if '<string name="coomi_go_grant">' not in s:
     s = s.replace('<string name="coomi_allow">允许</string>',

@@ -42,5 +42,6 @@ export const router = createRouter({
     { path: '/maintenance', name: 'maintenance', component: () => import('@/views/MaintenanceView.vue') },
     { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue') },
     { path: '/updates', name: 'updates', component: () => import('@/views/UpdatesView.vue') },
+    { path: '/cloud', name: 'cloud-access', component: () => import('@/views/CloudAccessView.vue') },
   ],
 })

@@ -7,7 +7,7 @@ public final class CoomiConstants {
 
     private CoomiConstants() {}
 
-    // Coomi config directory ~/.coomi/
+    // Comax config directory ~/.coomi/
     public static final String COOMI_CONFIG_DIR = TermuxConstants.TERMUX_HOME_DIR_PATH + "/.coomi";
     public static final String COOMI_PROVIDER_FILE = COOMI_CONFIG_DIR + "/config/providers.json";
 

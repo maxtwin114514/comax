@@ -24,6 +24,21 @@ const error = ref('')
 const info = ref<UpdateInfo | null>(null)
 const currentCode = ref(0)
 const canInstall = computed(() => Boolean(window.CoomiAndroid?.installApk))
+/**
+ * 更新提醒开关。
+ *
+ * 真值存在安卓侧 SharedPreferences（不是 localStorage）：启动时的更新检查
+ * 发生在前端加载之前，那时只有原生能给出答案。
+ * 纯浏览器环境（没有桥）不显示这一项 —— 它管的是安卓的启动弹窗。
+ */
+const canToggleNotify = computed(() => Boolean(window.CoomiAndroid?.setUpdateNotifyEnabled))
+const notifyEnabled = ref(true)
+
+function toggleNotify() {
+  const next = !notifyEnabled.value
+  notifyEnabled.value = next
+  window.CoomiAndroid?.setUpdateNotifyEnabled?.(next)
+}
 const hasUpdate = computed(() => Boolean(info.value && info.value.versionCode > currentCode.value))
 
 function resolveApkUrl(data: Record<string, unknown>): string | undefined {
@@ -75,6 +90,7 @@ function formatSize(value?: number): string {
 
 onMounted(() => {
   currentCode.value = window.CoomiAndroid?.getAppVersionCode?.() ?? 0
+  notifyEnabled.value = window.CoomiAndroid?.getUpdateNotifyEnabled?.() ?? true
   void refresh()
 })
 </script>
@@ -107,10 +123,30 @@ onMounted(() => {
           {{ installing ? '正在下载安装…' : hasUpdate ? '下载并安装魔改版' : '当前已是最新版' }}
         </button>
       </template>
+
+      <section v-if="canToggleNotify" class="group notify-group">
+        <button class="line notify-row" role="switch" :aria-checked="notifyEnabled" @click="toggleNotify">
+          <span class="nlabel">
+            <span>启动时提醒更新</span>
+            <em>关闭后进入软件不再弹更新弹窗；仍可在此页手动检查并安装</em>
+          </span>
+          <span class="switch" :class="{ on: notifyEnabled }"><i /></span>
+        </button>
+      </section>
     </main>
   </div>
 </template>
 
 <style scoped>
 .page{display:flex;flex-direction:column;height:100%;background:var(--page)}.body{flex:1;overflow:auto;padding:14px 12px calc(var(--safe-bottom) + 24px)}.source-card{display:grid;grid-template-columns:1fr auto;align-items:center;gap:5px 10px;margin-bottom:12px;padding:12px 13px;border:1px solid var(--border);border-radius:var(--r-card);background:var(--bg)}.source-card span{color:var(--text);font-size:13px;font-weight:650}.source-card code{grid-column:1;color:var(--blue);font:11px var(--font-mono)}.source-card button{grid-column:2;grid-row:1/3;min-height:36px;padding:0 11px;border-radius:var(--r-sm);background:var(--blue-soft);color:var(--blue);font-size:12px}.notice{margin:0 0 10px;padding:9px 12px;border-radius:var(--r-md);background:var(--blue-soft);color:var(--blue);font-size:12.5px}.notice.error{background:var(--danger-soft);color:var(--danger)}.group{margin-bottom:12px;overflow:hidden;border:1px solid var(--border);border-radius:var(--r-card);background:var(--bg)}.line{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 13px;border-bottom:1px solid var(--border);font-size:13px}.line span,.hash span{color:var(--text-3)}.line strong{color:var(--text);text-align:right}.line strong.new{color:var(--blue)}.line strong.ok{color:var(--ok)}.hash{display:grid;gap:5px;padding:11px 13px;border-bottom:1px solid var(--border);font-size:11px}.hash code{overflow-wrap:anywhere;color:var(--text-2);font-family:var(--font-mono)}.notes{padding:12px 13px;color:var(--text-2);font-size:12.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word}.primary{display:flex;align-items:center;justify-content:center;width:100%;min-height:44px;border-radius:var(--r-md);background:var(--blue);color:white;font-size:14px;font-weight:650}.primary:disabled{opacity:.5}
+.notify-group{margin-top:12px}
+.notify-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;border:0;background:var(--bg);text-align:left;padding:12px 13px}
+.nlabel{display:flex;flex-direction:column;gap:3px;min-width:0}
+.nlabel>span{color:var(--text);font-size:13px;font-weight:600}
+.nlabel em{color:var(--text-3);font-size:11.5px;font-style:normal;line-height:1.5}
+.switch{position:relative;flex-shrink:0;width:42px;height:24px;border-radius:var(--r-pill);background:var(--fill-strong);transition:background .18s ease}
+.switch i{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--bg);box-shadow:var(--shadow-1);transition:transform .18s cubic-bezier(.22,.68,.19,1)}
+.switch.on{background:var(--blue)}
+.switch.on i{transform:translateX(18px)}
+[data-all-animations-off] .switch,[data-all-animations-off] .switch i{transition:none}
 </style>

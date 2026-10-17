@@ -17,6 +17,7 @@ use crate::ToolRuntime;
 use crate::TurnControl;
 use crate::compacted_history;
 use crate::normalize_history;
+use crate::prune_oversized_tool_results;
 use crate::trim_history_to_fit;
 use crate::types::sanitize_json_encoded_data;
 use crate::types::sanitize_long_encoded_data;
@@ -414,6 +415,9 @@ impl Agent {
                     sanitize_json_encoded_data(&mut call.arguments);
                 }
             }
+            // 对齐上游 standard 预设的 tool-result-pruner：只裁**超长**工具结果的中段，
+            // 保住首尾（命令开头与报错结尾），比"一超限就全部抹掉"少毁证据。
+            prune_oversized_tool_results(&mut messages);
             if !vision_replay {
                 // 图片降级：请求中剥离工具消息携带的图片（base64），避免上游
                 // 拒绝图片导致整会话反复失败。图片本身仍留在会话记录中，
@@ -431,7 +435,11 @@ impl Agent {
                 search_enabled: false,
                 thinking_enabled: self.reasoning_effort.as_deref() != Some("off"),
             };
-            let stream_observer = ObserverStream { observer };
+            let reasoning_sink = Arc::new(std::sync::Mutex::new(String::new()));
+            let stream_observer = ObserverStream {
+                observer,
+                reasoning: Arc::clone(&reasoning_sink),
+            };
             let mut retry_attempt = 0_u8;
             let mut image_retry_used = false;
             let response = loop {
@@ -516,10 +524,15 @@ impl Agent {
             } else {
                 Vec::new()
             };
-            session.messages.push(ChatMessage::assistant(
+            let mut assistant_message = ChatMessage::assistant(
                 response_content.clone(),
                 recorded_tool_calls,
-            ));
+            );
+            // 思考过程跟着这一轮的 assistant 消息一起落盘；空思考就不带这个字段。
+            if let Ok(mut sink) = reasoning_sink.lock() {
+                assistant_message.reasoning = std::mem::take(&mut *sink);
+            }
+            session.messages.push(assistant_message);
             session.context.observe_usage(
                 &response.usage,
                 &self.system_prompt,
@@ -775,10 +788,17 @@ impl Agent {
         );
         session.usage.add(&compact_usage);
         let status = session.context.status(&provider.capabilities());
+        let summary = session
+            .messages
+            .iter()
+            .find(|message| message.compaction_summary)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
         observer.on_event(&AgentEvent::CompactionCompleted {
             automatic,
             before_tokens,
             after_tokens: status.used_tokens,
+            summary,
         });
         observer.on_event(&AgentEvent::ContextUpdated(status));
         Ok(())
@@ -986,6 +1006,9 @@ fn is_usage_limit_error(error: &AgentError) -> bool {
 
 struct ObserverStream<'a> {
     observer: &'a dyn AgentObserver,
+    /// 顺便把本轮思考过程攒下来，回合结束时挂到 assistant 消息上落盘
+    /// （前端重进会话仍能回放思考过程）。
+    reasoning: Arc<std::sync::Mutex<String>>,
 }
 
 impl ModelStreamObserver for ObserverStream<'_> {
@@ -995,6 +1018,9 @@ impl ModelStreamObserver for ObserverStream<'_> {
     }
 
     fn on_reasoning_delta(&self, delta: &str) {
+        if let Ok(mut sink) = self.reasoning.lock() {
+            sink.push_str(delta);
+        }
         self.observer
             .on_event(&AgentEvent::ReasoningDelta(delta.to_owned()));
     }

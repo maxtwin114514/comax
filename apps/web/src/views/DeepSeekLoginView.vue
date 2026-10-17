@@ -193,7 +193,7 @@ function backToProviders() { router.push('/providers') }
       <div class="ds-hero">
         <CoomiIcon name="sparkle" :size="28" />
         <h2>DeepSeek 登录</h2>
-        <p>登录账号后，可在 Coomi 中使用 DeepSeek 对话模型。</p>
+        <p>登录账号后，可在 Comax 中使用 DeepSeek 对话模型。</p>
       </div>
 
       <!-- 模型能力：新版单一模型 + 思考/联网开关 -->

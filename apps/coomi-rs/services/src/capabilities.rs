@@ -721,6 +721,14 @@ mod tests {
 
     #[tokio::test]
     async fn probe_handles_success_field_rejection_rate_limit_bad_json_and_timeout() {
+        // 探针超时与慢用例的延迟必须拉开量级，而且超时值本身不能卡得太紧。
+        //
+        // 这两个数字原来写的是 40ms / 100ms：整套测试并发跑满 CPU 时，一次本机
+        // HTTP 往返都可能超过 40ms，于是"正常返回"的用例被误判成超时，测试随
+        // 机器负载随机变红。它测的是探针逻辑，不该测机器有多忙 —— 所以放宽到
+        // 300ms / 1000ms，语义（超时 < 慢用例）不变，余量变成 7 倍。
+        const PROBE_TIMEOUT_MS: u64 = 300;
+        const SLOW_CASE_DELAY_MS: u64 = 1000;
         let cases = [
             ("200 OK", "{}", 0, CapabilityState::Verified, None),
             (
@@ -738,7 +746,7 @@ mod tests {
                 None,
             ),
             ("200 OK", "not-json", 0, CapabilityState::Unknown, None),
-            ("200 OK", "{}", 100, CapabilityState::Unknown, None),
+            ("200 OK", "{}", SLOW_CASE_DELAY_MS, CapabilityState::Unknown, None),
         ];
         for (status, body, delay, text_state, parallel_state) in cases {
             let base = mock_server(status, body, delay).await;
@@ -752,7 +760,7 @@ mod tests {
             let profile = probe_model_capabilities_with_timeout(
                 ModelCapabilityProfile::inferred(key),
                 "key",
-                std::time::Duration::from_millis(40),
+                std::time::Duration::from_millis(PROBE_TIMEOUT_MS),
             )
             .await;
             assert_eq!(profile.text.state, text_state);

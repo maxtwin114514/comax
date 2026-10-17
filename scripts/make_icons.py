@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Coomi launcher icons + in-app logos from assets/coomi-agent.png.
+"""Generate Comax launcher icons + in-app logos from assets/coomi-agent.png.
 
 The source art is a blue quatrefoil mark on a solid white canvas. We rebuild it as:
 

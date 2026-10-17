@@ -16,6 +16,7 @@ pub use context::compacted_history;
 pub use context::compaction_target_tokens;
 pub use context::estimate_request_tokens;
 pub use context::normalize_history;
+pub use context::prune_oversized_tool_results;
 pub use context::retained_user_history;
 pub use context::trim_compacted_history;
 pub use context::trim_history_to_fit;

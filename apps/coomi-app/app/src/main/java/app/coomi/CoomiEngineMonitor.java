@@ -126,7 +126,7 @@ public class CoomiEngineMonitor extends Service {
 
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
-            mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Coomi::EngineMonitor");
+            mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Comax::EngineMonitor");
             mWakeLock.setReferenceCounted(false);
             updateWakeLockForTask();
         }
@@ -283,7 +283,7 @@ public class CoomiEngineMonitor extends Service {
     private void updateStatus(String status) {
         mCurrentStatus = status;
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification("Coomi: " + status));
+        if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification("Comax: " + status));
     }
 
     /** 通知点击目标：按「启动首页」设置跳控制台或对话页。只用 NEW_TASK 复用现有
@@ -299,7 +299,7 @@ public class CoomiEngineMonitor extends Service {
     }
 
     private Notification buildNotification(String contentText) {
-        // 任务执行状态拼进正文：如「Coomi: 运行中 · 任务执行中」
+        // 任务执行状态拼进正文：如「Comax: 运行中 · 任务执行中」
         int runningTasks = runningTaskCount();
         if (runningTasks > 0) {
             contentText += " · " + runningTasks + " 个任务执行中";

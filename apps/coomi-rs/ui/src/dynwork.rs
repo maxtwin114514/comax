@@ -1,6 +1,6 @@
 //! 动态工作流引擎（M1）：门面注入 + 记账 + journal/回放 + 子代理会话 + 世界调用白名单。
 //!
-//! 这是「群友 Dynamic Workflow（ZCode）文档包」在 Coomi 引擎上的等价实现，按
+//! 这是「群友 Dynamic Workflow（ZCode）文档包」在 Comax 引擎上的等价实现，按
 //! `dynamic-workflow-engine-spec-for-pi.md` §3/§5/§9 与 `engine-ground-truth.md`
 //! 的 M1 边界落地。核心不变量：
 //!

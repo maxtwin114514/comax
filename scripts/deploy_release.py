@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Coomi-Android 发布部署脚本：
+Comax-Android 发布部署脚本：
   1) 上传 APK + latest.json 到更新服务器 8.148.146.68
      /www/wwwroot/updates.septemc.com/coomi/android/
   2) 上传官网 index.html 到 /www/wwwroot/coomi.septemc.com/

@@ -73,30 +73,277 @@ function toggleBar() {
   barIcon.value = barOpen.value ? ChevronUp : Menu
 }
 
-/** 模式面板：原大小按钮从模式键位置模糊分裂展开（stagger），收回时聚拢消失。 */
+/**
+ * 模式面板：**三阶段**动画。
+ *
+ *   阶段一：四张卡以「叠成一摞」的形态从输入框里升上来（模糊 → 清晰，由快到慢）。
+ *           这一阶段结束时它们**仍然是摞着的**，只是露出来了。
+ *   阶段二：在这摞卡上停顿 0.40 秒。**这个停顿只属于"堆叠 → 摊开"之间**，
+ *           其他地方（浮出、收起）都没有任何停顿。
+ *   阶段三：从左到右依次摊开成正常的一排按钮。
+ *
+ * 收回：反着来 —— 四张卡从右往左折回成一摞，然后整摞沉回输入框里。
+ *
+ * ## 为什么用 CSS 过渡 + 两个状态类
+ *
+ * 上一版用一根 GSAP 时间线 + reverse() 实现"可打断倒放"，真机上出现「收不回」
+ * 「只播一半」—— JS 状态机只要有一个回调没跑到（元素被 v-if 卸掉、时间线绑到
+ * 游离节点），面板就永远卡在可见态。
+ *
+ * 现在用两段 CSS 过渡：`.open` 负责"露出来"，`.spread` 负责"摊开"。过渡在被打断时
+ * 由浏览器自己从当前计算值往回走，没有回调依赖；摘节点另用定时器兜底。
+ * 这样"堆叠 → 停顿 → 摊开"这三个阶段的边界就是两个明确的时刻，而不是一堆补间。
+ *
+ * 拆成两个类也顺带解决了"卡片在浮出期间是隐形的"那个 bug：上一版把 0.4s 的停顿
+ * 也算进了卡片的 transition-delay，于是卡片要等 740ms 才出现，浮出阶段根本看不到
+ * 那摞卡，动画自然就"没按说的做"。
+ */
 const modePopEl = ref<HTMLElement | null>(null)
-watch(barOpen, (open) => {
-  const panel = modePopEl.value
-  if (!panel) return
-  const buttons = Array.from(panel.querySelectorAll<HTMLElement>('.pill'))
-  if (prefersReducedMotion() || !config.sendMorphAnimation || config.allAnimationsOff) return
-  if (open) {
-    gsap.killTweensOf(buttons)
-    gsap.fromTo(buttons,
-      { opacity: 0, scale: 0.6, filter: 'blur(6px)', y: 10 },
-      {
-        opacity: 1, scale: 1, filter: 'blur(0px)', y: 0,
-        duration: 0.32, ease: 'power2.out', stagger: 0.045,
-      },
-    )
-  } else {
-    gsap.killTweensOf(buttons)
-    gsap.to(buttons, {
-      opacity: 0, scale: 0.6, filter: 'blur(6px)', y: 8,
-      duration: 0.2, ease: 'power2.in', stagger: 0.025,
-    })
+/** 「模式」按键本体：动画的起点。 */
+const modeToggleEl = ref<HTMLElement | null>(null)
+/** 是否挂在 DOM 上（比 barOpen 长命：收起动画播完才摘）。 */
+const panelMounted = ref(false)
+/** 阶段一：容器与卡片已"露出来"，卡片仍是摞着的。 */
+const panelOpen = ref(false)
+/** 阶段三：卡片摊开。 */
+const panelSpread = ref(false)
+/** 收回中：整块向右滑出屏幕（与展开的"向上浮出"是不同的终点）。 */
+const panelDismissing = ref(false)
+
+let appearTimer: ReturnType<typeof setTimeout> | null = null
+let spreadTimer: ReturnType<typeof setTimeout> | null = null
+let foldTimer: ReturnType<typeof setTimeout> | null = null
+let unmountTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 动画总开关：任一关闭就退化成直接显示/隐藏，不播过渡。 */
+const modeAnimOff = computed(
+  () => prefersReducedMotion() || !config.sendMorphAnimation || config.allAnimationsOff,
+)
+
+// 时序（毫秒）。改这几个数字就等于改整个节奏，注释里写清各自的归属。
+/** 阶段一：整摞卡浮出到位。 */
+const EMERGE_MS = 340
+/**
+ * 阶段二：堆叠 → 摊开之间的停顿。
+ *
+ * 用户 1.5.2o7beta 明确要求「干脆别停顿」：一摞卡升出来就立刻摊开，
+ * 中间不再空等。留成常量而不是删掉，是因为停顿曾经是需求的一部分，
+ * 将来要改回去只动这一个数字。
+ */
+const STACK_PAUSE_MS = 0
+/** 阶段三：单张卡摊开的时长与相邻两张的错开间隔。 */
+const CARD_MS = 260
+const CARD_STAGGER_MS = 55
+/** 收起时整摞沉回去的时长。 */
+const SINK_MS = 300
+
+function clearTimers() {
+  for (const timer of [appearTimer, spreadTimer, foldTimer, unmountTimer]) {
+    if (timer) clearTimeout(timer)
   }
+  appearTimer = spreadTimer = foldTimer = unmountTimer = null
+}
+
+/**
+ * 状态条（"Comax 正在思考…"那一行）由 StatusBar 组件渲染在 ChatView 上，
+ * 不在本组件的可修改范围里，所以按 DOM 找它、只动 transform/opacity/filter。
+ * 也用 CSS 过渡，这样它和卡牌是同一套动画，打断时一起往回走。
+ */
+function findStatusBar(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.sbar')
+}
+
+function setStatusBarHidden(hidden: boolean) {
+  const bar = findStatusBar()
+  if (!bar) return
+  bar.style.transition = 'opacity .26s ease, transform .26s ease, filter .26s ease'
+  if (hidden) {
+    bar.style.opacity = '0'
+    bar.style.transform = 'translateY(-14px)'
+    bar.style.filter = 'blur(6px)'
+    bar.style.pointerEvents = 'none'
+    return
+  }
+  bar.style.opacity = ''
+  bar.style.transform = ''
+  bar.style.filter = ''
+  bar.style.pointerEvents = ''
+}
+
+function clearStatusBar() {
+  const bar = findStatusBar()
+  if (!bar) return
+  bar.style.transition = ''
+  bar.style.opacity = ''
+  bar.style.transform = ''
+  bar.style.filter = ''
+  bar.style.pointerEvents = ''
+}
+
+/**
+ * 把四张卡"垂直摞成一叠"所需的位移写进 CSS 变量。
+ *
+ * 用户要的是"垂直摞起来"（像一叠牌），不是同一位置错开：四张卡全部落在第一张的
+ * 位置上，但每张往下错开半个按钮的高度，看起来就是从上到下整齐叠着的一摞。
+ *
+ * 必须读 offsetLeft/offsetTop 现算：按钮是 flex 排布的，位置由布局决定，只有把
+ * 每张卡平移到同一个锚点，它们才真的叠起来。上一版只给了同一个 x 偏移量，
+ * 结果四张卡各占各的位置，从来没叠过。
+ */
+
+/**
+ * 堆叠错开步长：**只错开几像素**，让四张卡几乎重合、只露一点边缘，才是一叠牌。
+ *
+ * 曾经按「一张卡的高度」递进错开，四张卡排成一条竖列 —— 用户看到的正是
+ * 「展开动画是竖向排列」，不是「叠在一起」。
+ */
+const STACK_STEP_X = 1
+const STACK_STEP_Y = 4
+
+/** 累加 offsetLeft/offsetTop，得到元素在某个祖先（不含 transform）坐标系里的位置。 */
+function offsetWithin(el: HTMLElement, ancestor: HTMLElement): { x: number; y: number } {
+  let x = 0
+  let y = 0
+  let node: HTMLElement | null = el
+  while (node && node !== ancestor) {
+    x += node.offsetLeft
+    y += node.offsetTop
+    node = node.offsetParent as HTMLElement | null
+  }
+  return { x, y }
+}
+
+/**
+ * 计算「从『模式』按键分裂出来」这套动画的几何。
+ *
+ * 1.5.2o8beta 起动画不再是「一横条从输入框升上来」，而是：
+ *   ① 整摞卡缩成「模式」按键那么大，正好盖在按键上；
+ *   ② 放大 / 上浮到位（还是摞着）；
+ *   ③ 再从摞着的状态从左到右摊开。
+ *
+ * 关键是把 `transform-origin` 钉在**卡摞的中心**（不是容器中心，容器是整行宽的，
+ * 中心离卡摞很远）。origin 在卡摞中心时，缩放不会让内容横向漂移；再配一个 translate
+ * 把卡摞中心搬到按键中心，起点就精确落在按键上 —— 看起来就是按键裂成了四张卡。
+ */
+function layoutStack(panel: HTMLElement) {
+  const buttons = Array.from(panel.querySelectorAll<HTMLElement>('.pill'))
+  if (buttons.length === 0) return
+  const first = buttons[0]
+  const anchorLeft = first.offsetLeft
+  const anchorTop = first.offsetTop
+  const stackWidth = first.offsetWidth + (buttons.length - 1) * STACK_STEP_X
+  const stackHeight = first.offsetHeight + (buttons.length - 1) * STACK_STEP_Y
+
+  // origin = 卡摞中心（panel 局部坐标）
+  const originX = anchorLeft + stackWidth / 2
+  const originY = anchorTop + stackHeight / 2
+  panel.style.setProperty('--origin-x', `${originX.toFixed(1)}px`)
+  panel.style.setProperty('--origin-y', `${originY.toFixed(1)}px`)
+
+  // 起点位移 = 按键中心 − 卡摞中心（换算到同一个 .composer 坐标系）
+  const host = panel.offsetParent as HTMLElement | null
+  const toggle = modeToggleEl.value
+  if (host && toggle && stackWidth > 0 && stackHeight > 0) {
+    const togglePos = offsetWithin(toggle, host)
+    const toggleCenterX = togglePos.x + toggle.offsetWidth / 2
+    const toggleCenterY = togglePos.y + toggle.offsetHeight / 2
+    const stackCenterX = panel.offsetLeft + originX
+    const stackCenterY = panel.offsetTop + originY
+    panel.style.setProperty('--from-x', `${(toggleCenterX - stackCenterX).toFixed(1)}px`)
+    panel.style.setProperty('--from-y', `${(toggleCenterY - stackCenterY).toFixed(1)}px`)
+    // 缩放比 = 按键尺寸 / 卡摞尺寸：起点时卡摞正好盖住按键
+    const scale = Math.min(
+      toggle.offsetWidth / stackWidth,
+      toggle.offsetHeight / stackHeight,
+    )
+    panel.style.setProperty('--from-scale', Math.max(0.08, Math.min(1, scale)).toFixed(3))
+  }
+
+  buttons.forEach((el, index) => {
+    // 全部收到第一张卡的位置，再按固定小步长错开 —— 这才是「一叠牌」，不是竖列
+    el.style.setProperty('--sx', `${anchorLeft - el.offsetLeft + index * STACK_STEP_X}px`)
+    el.style.setProperty('--sy', `${anchorTop - el.offsetTop + index * STACK_STEP_Y}px`)
+    // 摊开与折回都从左往右
+    el.style.setProperty('--spread-delay', `${index * CARD_STAGGER_MS}ms`)
+    el.style.setProperty('--fold-delay', `${index * CARD_STAGGER_MS}ms`)
+  })
+}
+
+function cardCount(): number {
+  return modePopEl.value?.querySelectorAll('.pill').length ?? 0
+}
+
+function openPanel() {
+  clearTimers()
+  panelOpen.value = false
+  panelSpread.value = false
+  panelDismissing.value = false
+  panelMounted.value = true
+  void nextTick().then(() => {
+    const panel = modePopEl.value
+    if (panel) layoutStack(panel)
+    // 等两帧再翻状态：第一帧让元素带着"收起态"真正画到屏幕上，第二帧才切到
+    // 阶段一。只等一帧的话，"插入"与"改类名"会合并进同一次绘制，浏览器看不到
+    // 变化前的样式，过渡不会触发 —— 表现就是面板"啪"地一下出现，没有动画。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        panelOpen.value = true
+        setStatusBarHidden(true)
+      })
+    })
+    // 阶段二 → 阶段三：浮出到位后再停 0.4 秒才摊开
+    spreadTimer = setTimeout(() => {
+      spreadTimer = null
+      panelSpread.value = true
+    }, EMERGE_MS + STACK_PAUSE_MS)
+  })
+}
+
+function closePanel() {
+  clearTimers()
+  setStatusBarHidden(false)
+  // 两件事**同时**发生：
+  //   ① 四张卡从左往右逐张折回（--fold-delay 依次递增）
+  //   ② 整块向右滑出屏幕（.dismissing）
+  // 这里刻意保持 panelOpen = true：一旦置 false，容器会回到"沉在输入框里"那个
+  // 起点，收回就变成向下沉了 —— 而需求要的是向右滑出去。
+  panelSpread.value = false
+  panelDismissing.value = true
+  const foldTotal = Math.max(0, cardCount() - 1) * CARD_STAGGER_MS + CARD_MS
+  // 兜底摘节点：过渡回调在被打断/元素被替换时可能不触发，用定时器就不会卡住
+  unmountTimer = setTimeout(() => {
+    unmountTimer = null
+    panelMounted.value = false
+    panelOpen.value = false
+    panelDismissing.value = false
+    clearStatusBar()
+  }, Math.max(foldTotal, SINK_MS) + 80)
+}
+
+watch(barOpen, open => {
+  if (modeAnimOff.value) {
+    clearTimers()
+    panelOpen.value = open
+    panelSpread.value = open
+    panelDismissing.value = false
+    panelMounted.value = open
+    if (!open) clearStatusBar()
+    return
+  }
+  if (open) openPanel()
+  else closePanel()
 })
+
+onMounted(() => {
+  // 组件可能在面板打开时被卸载重建，清掉可能残留的状态条样式
+  clearStatusBar()
+})
+
+onBeforeUnmount(() => {
+  clearTimers()
+  clearStatusBar()
+})
+
 const modeLabel = computed(() => PERMISSION_MODES.find(m => m.mode === config.permissionMode)?.label ?? '')
 const providerReady = computed(() => config.providers.some(provider => (
   provider.id === config.activeId
@@ -508,7 +755,7 @@ watch(text, () => {
           class="input"
           :class="{ scrollable: textareaScrollable }"
           rows="1"
-          :placeholder="session.isBusy ? '插队补充指令…' : '给 Coomi 下达任务…'"
+          :placeholder="session.isBusy ? '插队补充指令…' : '给 Comax 下达任务…'"
           @input="autoGrow"
           @keydown="onKeydown"
         />
@@ -516,7 +763,14 @@ watch(text, () => {
 
         <div class="bar">
           <!-- 三横杠：模式按钮竖向折叠，点击向上展开面板 -->
-          <button class="pill bar-toggle" :class="{ on: barOpen }" @click="toggleBar" aria-label="更多模式" :aria-expanded="barOpen">
+          <button
+            ref="modeToggleEl"
+            class="pill bar-toggle"
+            :class="{ on: barOpen }"
+            @click="toggleBar"
+            aria-label="更多模式"
+            :aria-expanded="barOpen"
+          >
             <MorphIcon
               :icon="barIcon"
               :size="15"
@@ -552,8 +806,18 @@ watch(text, () => {
             <CoomiIcon v-else name="arrowUp" :size="18" />
           </button>
         </div>
-                <Transition name="mode-pop">
-          <div v-if="barOpen" ref="modePopEl" class="mode-pop" role="group" aria-label="模式选项">
+          <div
+            v-if="panelMounted"
+            ref="modePopEl"
+            class="mode-pop"
+            :class="{
+              open: panelOpen || modeAnimOff,
+              spread: panelSpread || modeAnimOff,
+              dismissing: panelDismissing,
+            }"
+            role="group"
+            aria-label="模式选项"
+          >
             <button class="pill" :class="{ on: config.planMode }" @click="session.togglePlanMode()">
               <CoomiIcon name="target" :size="14" />
               <span>计划</span>
@@ -571,7 +835,6 @@ watch(text, () => {
               <span>控制</span>
             </button>
           </div>
-        </Transition>
 
     </div>
 
@@ -740,20 +1003,118 @@ watch(text, () => {
   flex-wrap: wrap; min-width: 0;
 }
 .spacer { flex: 1 1 auto; min-width: 4px; }
-/* 模式竖向弹出面板：在输入框上方竖排，带展开动画（由快到慢）。 */
+/* ── 模式面板：从「模式」按键分裂 → 摊开（1.5.2o8beta） ──
+   只动 transform / opacity / filter 这三个合成器能处理的属性；
+   刻意不碰 width/height/left 这类会触发重排的属性，否则在 WebView 上会掉帧。
+
+   三个几何变量由 layoutStack() 现算，别在这里写死：
+     --origin-x / --origin-y  卡摞中心（容器局部坐标），缩放原点
+     --from-x / --from-y      起点位移：把卡摞中心搬到「模式」按键中心
+     --from-scale             起点缩放：让卡摞正好盖住那颗按键
+   起点 = 按键本身，所以观感是"按键裂成四张卡"，而不是"一条横带从底下升上来"。 */
+
+/* 容器基础态 = **展开的起点**：沉在输入框下方一点，缩小、模糊、不可点
+   （不可点很重要，否则会误触看不见的按钮）。 */
 .mode-pop {
-  position: absolute; z-index: 5; left: 10px; right: 10px; bottom: calc(100% + 8px);
+  /*
+   * 动画锚点：容器覆盖整张输入区（相对 .composer），但**展开起点**收缩成
+   * 「模式」按键自己的位置与尺寸（左上角的 origin + 缩小到按钮大小）。
+   *
+   * 1.5.2o8beta 的动画是「从『模式』按键分裂出来」：整摞卡先从按键处升起、放大，
+   * 到位后才从左到右摊开。起点不再是一条从输入框底部升上来的横带，而是那颗
+   * 按键本身 —— 视觉上像按键裂开变成了四张卡。
+   */
+  position: absolute; z-index: 5; left: 0; right: 0; bottom: calc(100% + 8px);
   display: flex; flex-direction: row; align-items: center; justify-content: flex-start;
   flex-wrap: wrap; gap: 6px;
-  /* 透明浮层：按钮就是普通 pill 大小，从模式键位置模糊分裂出来 */
   background: transparent; border: 0; box-shadow: none; padding: 0;
+  opacity: 0;
+  transform-origin: var(--origin-x, 16px) var(--origin-y, 16px);
+  transform: translate(var(--from-x, 0px), var(--from-y, 12px)) scale(var(--from-scale, .2));
+  filter: blur(6px);
+  pointer-events: none;
+  transition:
+    opacity .26s cubic-bezier(.22,.68,.19,1),
+    transform .34s cubic-bezier(.22,.68,.19,1),
+    filter .26s cubic-bezier(.22,.68,.19,1);
+  will-change: transform, opacity;
 }
+
+/* 阶段一：从按键处放大到位、聚焦。此时卡片仍叠在锚点上（见下面的 --sx/--sy）。 */
+.mode-pop.open {
+  opacity: 1;
+  transform: none;
+  filter: blur(0px);
+  pointer-events: auto;
+  /* 到位后立刻可以点：卡片是摞着的，用户可能想直接点最上面那张 */
+}
+
+/* 关闭动画 / 减弱动效：不做分裂，直接显形 */
+@media (prefers-reduced-motion: reduce) {
+  .mode-pop { transform: none; filter: none; transition: none; }
+}
+[data-all-animations-off] .mode-pop {
+  transform: none; filter: none; transition: none;
+}
+
+/*
+ * 收回：**同时**向右滑出屏幕。
+ *
+ * 终点与展开的起点不同（展开是"从下面浮上来"，收回是"从右边滑出去"），
+ * 所以必须用独立状态，不能靠"回到非 .open"来实现 —— 那样收回会变成向下沉。
+ *
+ * opacity 用一点延迟再淡出：滑出的过程要让用户看见卡片正在从左往右折叠，
+ * 一上来就透明掉等于看不到折叠。
+ */
+.mode-pop.open.dismissing {
+  transform: translateX(118%);
+  opacity: 0;
+  transition:
+    transform .34s cubic-bezier(.22,.68,.19,1),
+    opacity .16s ease .26s,
+    filter .34s cubic-bezier(.22,.68,.19,1);
+  pointer-events: none;
+}
+
+/*
+ * 单张卡：
+ *   · 基础态 = 叠在锚点上的一摞（位移到 --sx/--sy，缩小、透明）
+ *   · .open   = 显形，但**位置不动**（还是摞着）—— 这就是"堆叠状出来"
+ *   · .spread = 位移归零、放大回原尺寸，按 --spread-delay 从左到右摊开
+ *   · .dismissing 时回到基础态，按 --fold-delay **从左往右**逐张折回
+ *
+ * 之所以把"显形"和"摊开"分成两个类：上一版把两者挤进同一个 transition-delay，
+ * 结果 0.4s 的停顿也被算进了显形，卡片在浮出阶段根本看不见。
+ */
 .mode-pop .pill {
-  /* 保持与以前一样大小的按钮 */
   min-height: 0; width: auto;
+  transform: translate(var(--sx, 0px), var(--sy, 0px));
+  opacity: 0;
+  /* transition 是"覆盖"而不是"追加"，所以这里必须把 .pill 原本的
+     background/color 过渡一起带上，否则选中态换色会变成瞬变。 */
+  transition:
+    opacity .2s ease var(--fold-delay, 0s),
+    transform .26s cubic-bezier(.22,.68,.19,1) var(--fold-delay, 0s),
+    background .15s, color .15s;
 }
-.mode-pop-enter-active, .mode-pop-leave-active { transition: opacity .18s ease, transform .22s cubic-bezier(.22,.9,.28,1.1); }
-.mode-pop-enter-from, .mode-pop-leave-to { opacity: 0; transform: translateY(12px) scale(.97); }
+/* 阶段一：只显形，不移动 */
+.mode-pop.open .pill {
+  opacity: 1;
+  transition-delay: 0s, var(--fold-delay, 0s), 0s, 0s;
+}
+/* 阶段三：摊开 */
+.mode-pop.spread .pill {
+  transform: none;
+  opacity: 1;
+  transition-delay: var(--spread-delay, 0s), var(--spread-delay, 0s), 0s, 0s;
+}
+
+/* 系统减弱动效时不做堆叠位移，避免晕眩 */
+@media (prefers-reduced-motion: reduce) {
+  .mode-pop, .mode-pop .pill { transition: none; }
+  .mode-pop .pill { transform: none; }
+}
+
 .bar-toggle { flex-shrink: 0; }
 .bar-toggle.on { color: var(--blue); background: var(--blue-soft); }
 .production-pill.on { color: #ff3b30; background: rgba(255, 59, 48, 0.12); }

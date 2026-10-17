@@ -267,12 +267,12 @@ impl CoreTools {
 
     async fn configure_mcp(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         let Some(home) = &self.config_home else {
-            return ToolResult::error("Coomi configuration directory is not available");
+            return ToolResult::error("Comax configuration directory is not available");
         };
         if !approval
             .approve(
                 call,
-                "configure_mcp will modify the Coomi MCP configuration",
+                "configure_mcp will modify the Comax MCP configuration",
             )
             .await
         {
@@ -333,12 +333,12 @@ impl CoreTools {
 
     async fn install_skill(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         let Some(home) = &self.config_home else {
-            return ToolResult::error("Coomi configuration directory is not available");
+            return ToolResult::error("Comax configuration directory is not available");
         };
         if !approval
             .approve(
                 call,
-                "install_skill will download or copy files into the Coomi Skill directory",
+                "install_skill will download or copy files into the Comax Skill directory",
             )
             .await
         {
@@ -372,7 +372,7 @@ impl CoreTools {
     /// 需求：AI 自行卸载 = 彻底删除（管理页的卸载才是停用）。
     async fn uninstall_skill(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         let Some(home) = &self.config_home else {
-            return ToolResult::error("Coomi configuration directory is not available");
+            return ToolResult::error("Comax configuration directory is not available");
         };
         if !approval
             .approve(
@@ -398,7 +398,7 @@ impl CoreTools {
     /// 与 configure_mcp 对应——AI 自行卸载 = 彻底删除。
     async fn uninstall_mcp(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
         let Some(home) = &self.config_home else {
-            return ToolResult::error("Coomi configuration directory is not available");
+            return ToolResult::error("Comax configuration directory is not available");
         };
         if !approval
             .approve(
@@ -1231,7 +1231,7 @@ impl CoreTools {
                 }
             }
             None => ToolResult::success(
-                "本地模型工具可用性：本机未安装 ollama/llama-cli。可通过 Coomi 终端安装 ollama 后使用 local_model 推理。"
+                "本地模型工具可用性：本机未安装 ollama/llama-cli。可通过 Comax 终端安装 ollama 后使用 local_model 推理。"
             ),
         }
     }
@@ -1251,7 +1251,7 @@ impl CoreTools {
             let output = self.run_simple_cmd(&format!("python3 -c \"import pytesseract,sys;print(pytesseract.image_to_string(sys.argv[1]))\" {}", Self::shell_escape(path)));
             ToolResult::success(output)
         } else {
-            ToolResult::success("本地 OCR 不可用：未安装 tesseract 或 pytesseract。可在 Coomi 终端安装：apt install tesseract-ocr tesseract-ocr-chi-sim")
+            ToolResult::success("本地 OCR 不可用：未安装 tesseract 或 pytesseract。可在 Comax 终端安装：apt install tesseract-ocr tesseract-ocr-chi-sim")
         }
     }
 
@@ -1267,7 +1267,7 @@ impl CoreTools {
             let output = self.run_simple_cmd(&format!("edge-tts --text {} --write-media /tmp/coomi-tts.mp3", Self::shell_escape(text)));
             ToolResult::success(format!("[local_tts::edge-tts] 已生成 /tmp/coomi-tts.mp3\n{output}"))
         } else {
-            ToolResult::success("本地 TTS 不可用：未安装 espeak/edge-tts。可在 Coomi 终端安装：apt install espeak-ng")
+            ToolResult::success("本地 TTS 不可用：未安装 espeak/edge-tts。可在 Comax 终端安装：apt install espeak-ng")
         }
     }
 
@@ -1284,7 +1284,7 @@ impl CoreTools {
     /// 通过无障碍服务执行一个控制命令，返回 (是否成功, 输出)。
     fn run_control_command(&self, mut command: serde_json::Value, timeout: Duration) -> (bool, String) {
         let Some(dir) = self.control_queue_dir() else {
-            return (false, "控制模式不可用：未找到 Coomi 配置目录".to_string());
+            return (false, "控制模式不可用：未找到 Comax 配置目录".to_string());
         };
         if let Err(error) = std::fs::create_dir_all(&dir) {
             return (false, format!("无法创建控制命令目录: {error}"));
@@ -2355,7 +2355,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "apply_patch".into(),
-                description: "Atomically apply a Coomi patch containing add, update, move, and delete file operations.".into(),
+                description: "Atomically apply a Comax patch containing add, update, move, and delete file operations.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {"patch": {"type": "string"}},
@@ -2548,7 +2548,7 @@ impl ToolRuntime for CoreTools {
             specs.extend([
                 ToolSpec {
                     name: "configure_mcp".into(),
-                    description: "Install a curated MCP server or create/repair one Coomi MCP server configuration. Use catalog_id for curated entries; otherwise provide name and config.".into(),
+                    description: "Install a curated MCP server or create/repair one Comax MCP server configuration. Use catalog_id for curated entries; otherwise provide name and config.".into(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -2569,7 +2569,7 @@ impl ToolRuntime for CoreTools {
                 },
                 ToolSpec {
                     name: "install_skill".into(),
-                    description: "Install a curated Coomi Skill by catalog_id, or install from a local directory or GitHub repository URL using source.".into(),
+                    description: "Install a curated Comax Skill by catalog_id, or install from a local directory or GitHub repository URL using source.".into(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -2581,7 +2581,7 @@ impl ToolRuntime for CoreTools {
                 },
                 ToolSpec {
                     name: "uninstall_skill".into(),
-                    description: "Permanently uninstall a Skill by name: deletes its directory under the Coomi skills folder and removes the config/skills.json entry. Cannot be undone.".into(),
+                    description: "Permanently uninstall a Skill by name: deletes its directory under the Comax skills folder and removes the config/skills.json entry. Cannot be undone.".into(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
@@ -2673,7 +2673,7 @@ impl ToolRuntime for CoreTools {
                 ToolSpec {
                     name: "spawn_agent".into(),
                     description: format!(
-                        "Spawn a background Coomi sub-agent with an optional fork of parent history. {}",
+                        "Spawn a background Comax sub-agent with an optional fork of parent history. {}",
                         self.agent_scheduler
                             .as_ref()
                             .map(|scheduler| scheduler.sub_agent_summary())
@@ -2716,7 +2716,15 @@ impl ToolRuntime for CoreTools {
             ]);
         }
         if self.shell_only {
-            return specs.into_iter().filter(|spec| spec.name == "shell").collect();
+            // 极简模式（对齐 DeepSeek Harness 的 `minimal` 预设）只对外公布
+            // 「跑命令」与「看图」两件事：`shell` 是持久命令行（相当于上游的
+            // persistent bash），`show_image` 是 minimal 里唯一保留的读图能力
+            // （上游 read_image）。其余文件/网络/子代理工具一律不透出，省掉
+            // 每个请求几千 token 的工具 schema。
+            return specs
+                .into_iter()
+                .filter(|spec| spec.name == "shell" || spec.name == "show_image")
+                .collect();
         }
         if let Some(runtime) = &self.mcp_runtime {
             specs.extend(runtime.specs());
@@ -3519,7 +3527,7 @@ mod tests {
     #[tokio::test]
     async fn agent_can_configure_curated_mcp_in_coomi_home() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
-        let home = tempfile::tempdir().expect("temporary Coomi home");
+        let home = tempfile::tempdir().expect("temporary Comax home");
         let policy =
             SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
         let tools = CoreTools::new(workspace.path().to_path_buf(), policy)

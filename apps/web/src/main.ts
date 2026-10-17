@@ -113,6 +113,21 @@ function applyAppearance(config: AppearanceConfig) {
 window.__coomiApplyAppearance = applyAppearance
 
 /**
+ * 桌面标记：云端访问很可能是在电脑浏览器里打开，而界面是为手机竖屏设计的。
+ * 用「一直很宽 + 有精确指针」判定桌面，写一个 data-desktop 供 CSS 分叉。
+ *
+ * 不能用 UA 判断：安卓平板上打开的同样是宽屏，但它更接近手机的使用姿势；
+ * 反过来，桌面浏览器开窄窗口时仍应按手机排版走。
+ */
+function syncDesktopFlag() {
+  const wide = window.matchMedia('(min-width: 900px)').matches
+  const finePointer = window.matchMedia('(pointer: fine)').matches
+  document.documentElement.dataset.desktop = wide && finePointer ? 'true' : 'false'
+}
+syncDesktopFlag()
+window.addEventListener('resize', syncDesktopFlag)
+
+/**
  * 主题初始化：
  * - Android WebView 内由 CoomiActivity 经 JS 桥提供档位（优先级最高）；
  * - 桌面浏览器：localStorage 有手动档位则用之，否则跟随系统深浅色实时切换。

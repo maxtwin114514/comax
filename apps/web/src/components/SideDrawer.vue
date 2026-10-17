@@ -142,6 +142,7 @@ function openDashboard() {
         <button class="entry" @click="go('/catalog')"><CoomiIcon name="cube" :size="17" /><span>拓展</span></button>
         <button class="entry" @click="go('/browser')"><CoomiIcon name="globe" :size="17" /><span>浏览器</span></button>
         <button class="entry" @click="go('/notes')"><CoomiIcon name="notebook" :size="17" /><span>记忆库</span></button>
+        <button class="entry" @click="go('/cloud')"><CoomiIcon name="globe" :size="17" /><span>云端访问</span></button>
       </div>
       <button class="taskrow" @click="go('/tasks')">
         <CoomiIcon name="subtask" :size="17" />
@@ -242,27 +243,56 @@ function openDashboard() {
 </template>
 
 <style scoped>
-.drawer-root { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
-.drawer-root.open { pointer-events: auto; }
-
-.scrim {
-  position: absolute; inset: 0;
-  background: rgba(17, 22, 31, .34);
-  opacity: 0; transition: opacity .28s ease;
+/*
+ * 侧栏是"底图"：层级必须**低于**对话界面（.shell 是 10），这样它平时被对话界面
+ * 盖住（不常驻、不显示），只有对话界面向右滑开、让出这条宽度时才露出来。
+ *
+ * 之前两版各栽过一次：
+ *   · z-index 提太高 → 侧栏常驻在界面左侧，一直盖着对话界面；
+ *   · 丢了 .open 态的 pointer-events 恢复 → 侧栏看得到却点不动、滑不动。
+ *
+ * 交互能不能点，靠的是 .open 时恢复 pointer-events；层级低不影响点击 —— 因为
+ * 对话界面被 translateX 推开后，它就不在左侧这片区域上了，命中区自然让出来。
+ */
+.drawer-root {
+  position: fixed; inset: 0 auto 0 0;
+  width: var(--drawer-w, min(82vw, 340px));
+  z-index: 5;
+  pointer-events: none;
+  /*
+   * 侧栏是"底图"：卡片滑开时它一层都不动，但每帧都要被重新露出/裁切。
+   * contain: paint 把它的重绘限制在自己的盒子里，避免卡片移动时把整页一起标记脏区；
+   * 这两个属性都不改变布局与观感，只在渲染上有收益。
+   */
+  contain: paint;
+  will-change: transform;
 }
-.drawer-root.open .scrim { opacity: 1; }
+/* 打开时恢复交互：这是"侧栏能点、能滑"的关键，丢了就是半残废。 */
+.drawer-root.open {
+  pointer-events: auto;
+}
 
+/* 遮罩不再承担"点击关闭"—— 对话界面被推开后点它自己就会关（见 ChatView）。
+   这里保留元素但让它隐形：它现在压在对话界面下面，画出来也只会是一层看不见的
+   灰，留着反而容易和滑动动画叠出闪一下的观感。 */
+.scrim { display: none; }
+
+/*
+ * 侧栏面板是「底图」，它自己**不做任何动画**。
+ *
+ * 露不露出来完全由上面那张卡片（对话界面）滑开多少决定 —— 面板再自己淡入淡出，
+ * 就成了"一边滑一边闪"的两套动画叠在一起，观感就是闪一下。所以这里常驻可见、
+ * 常驻不动，宽度读 .chat 上那个变量，保证和卡片滑开的距离严丝合缝。
+ */
 .panel {
-  position: absolute; inset: 0 auto 0 0;
+  position: absolute; inset: 0;
   display: flex; flex-direction: column;
-  width: 82%; max-width: 340px;
+  width: 100%;
+  max-width: none;
   padding-top: var(--safe-top);
   background: var(--bg);
   box-shadow: none;
-  transform: translateX(-102%);
-  transition: transform .3s cubic-bezier(.22, .68, .19, 1);
 }
-.drawer-root.open .panel { transform: none; }
 
 .dhead { display: flex; align-items: center; gap: 6px; padding: 10px 10px 6px 12px; }
 .sfield {

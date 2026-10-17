@@ -58,6 +58,54 @@ function categoryPercent(value: number | undefined): string {
   return categoryTotal.value > 0 ? `${((value ?? 0) / categoryTotal.value * 100).toFixed(1)}%` : '--'
 }
 
+/**
+ * 上下文构成分段（右上下文圆环 + 图例 + 明细共用同一份数据）。
+ *
+ * 参照上游 1.6.x 的「上下文用量」面板：
+ *   · 各分段按 token 降序，最多 5 段 + 「其他」合并；
+ *   · 百分比以**上下文窗口**为分母（窗口未知时退回各段之和），
+ *     这样「1.2k / 128k」的环看起来才是真实的占用比例；
+ *   · offset 是累计百分比取负，SVG 里 dasharray 的起点因此首尾相接。
+ */
+const CATEGORY_COLORS = ['#5b6cff', '#14b8a6', '#f59e0b', '#f43f5e', '#8b5cf6', '#0ea5e9']
+const usageSegments = computed(() => {
+  const categories = session.usage?.contextCategories ?? {}
+  const window = session.usage?.contextWindow ?? 0
+  const total = Object.values(categories).reduce((sum, value) => sum + (value ?? 0), 0)
+  const denominator = window > 0 ? window : total
+  if (!denominator) return []
+  let cumulative = 0
+  const entries = Object.entries(categories)
+    .filter(([, tokens]) => (tokens ?? 0) > 0)
+    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+  const merged = entries.length > 6
+    ? [...entries.slice(0, 5), ['other', entries.slice(5).reduce((sum, [, tokens]) => sum + (tokens ?? 0), 0)] as const]
+    : entries
+  return merged.map(([key, tokens], index) => {
+    const percent = Math.min(100, ((tokens ?? 0) / denominator) * 100)
+    const segment = {
+      key,
+      label: (categoryLabels as Record<string, string>)[key] ?? key,
+      tokens: tokens ?? 0,
+      percent,
+      percentText: `${percent.toFixed(1)}%`,
+      color: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
+      offset: -cumulative,
+    }
+    cumulative += percent
+    return segment
+  })
+})
+const contextLeft = computed(() => Math.max(0, (session.usage?.contextWindow ?? 0) - (session.usage?.contextUsed ?? 0)))
+const messageCount = computed(() => session.timeline.filter(item => item.kind === 'user' || item.kind === 'assistant').length)
+const toolElapsedMs = computed(() => session.timeline.reduce((sum, item) => (item.kind === 'tool' ? sum + (item.elapsed ?? 0) : sum), 0))
+const rateText = computed(() => {
+  const usage = session.usage
+  if (!usage) return '--'
+  const rate = usage.turnRateTps || (usage.turnElapsedMs > 0 ? usage.turnOutputTokens / (usage.turnElapsedMs / 1000) : 0)
+  return rate > 0 ? `${rate.toFixed(1)} tok/s` : '--'
+})
+
 function formatTokens(value: number): string {
   if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M'
   if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
@@ -270,7 +318,18 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
     <button class="usage-button" :aria-expanded="usageOpen" aria-label="上下文用量" @click="toggleUsage">
       <svg class="usage-ring" viewBox="0 0 36 36" aria-hidden="true">
         <circle class="usage-track" cx="18" cy="18" r="15" pathLength="100" />
-        <circle class="usage-value" cx="18" cy="18" r="15" pathLength="100" :stroke-dasharray="usageStroke" />
+        <template v-if="usageSegments.length">
+          <circle
+            v-for="seg in usageSegments" :key="seg.key" class="usage-seg"
+            cx="18" cy="18" r="15" pathLength="100"
+            :style="{
+              stroke: seg.color,
+              strokeDasharray: `${Math.max(0.8, seg.percent - 1.5)} ${100 - Math.max(0.8, seg.percent - 1.5)}`,
+              strokeDashoffset: seg.offset,
+            }"
+          />
+        </template>
+        <circle v-else class="usage-value" cx="18" cy="18" r="15" pathLength="100" :stroke-dasharray="usageStroke" />
       </svg>
     </button>
       <button class="balance-button" :aria-expanded="balanceOpen" aria-label="余额与消耗" @click="toggleBalance">
@@ -304,18 +363,59 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
     <button v-if="usageOpen" class="usage-scrim" aria-label="关闭上下文数据" @click="usageOpen = false" />
     <div v-if="usageOpen" class="usage-menu">
       <p class="usage-title">上下文用量</p>
-      <div v-if="session.usage" class="usage-stats">
-        <div><span>会话 Token</span><strong>{{ formatTokens(session.usage.total) }}</strong></div>
-        <div><span>上下文使用</span><strong>{{ formatTokens(session.usage.contextUsed) }} / {{ formatTokens(session.usage.contextWindow) }}</strong></div>
-        <div><span>本轮缓存命中</span><strong>{{ formatPercent(session.usage.turnCacheHitRate) }}</strong></div>
-        <div><span>会话平均命中</span><strong>{{ formatPercent(session.usage.cacheHitRate) }}</strong></div>
-      </div>
-      <p v-else class="usage-empty">此对话尚无用量数据</p>
       <template v-if="session.usage">
-        <p class="usage-subtitle">上下文构成</p>
-        <div class="category-grid">
-          <div v-for="(label, category) in categoryLabels" :key="category"><span>{{ label }}</span><strong>{{ categoryPercent(session.usage.contextCategories[category]) }}</strong></div>
+        <!-- 顶栏那张"上下文环"的放大版：左边分段环 + 中心百分比，右边四行关键数字 -->
+        <div class="uc-top">
+          <div class="uc-ring">
+            <svg class="uc-ring-svg grown" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="usage-track" cx="18" cy="18" r="15" pathLength="100" />
+              <circle
+                v-for="seg in usageSegments" :key="seg.key" class="usage-seg"
+                cx="18" cy="18" r="15" pathLength="100"
+                :style="{
+                  stroke: seg.color,
+                  strokeDasharray: `${Math.max(0.8, seg.percent - 1.5)} ${100 - Math.max(0.8, seg.percent - 1.5)}`,
+                  strokeDashoffset: seg.offset,
+                }"
+              />
+            </svg>
+            <div class="uc-center"><strong>{{ usagePercent }}%</strong><span>已用</span></div>
+          </div>
+          <div class="uc-side">
+            <div class="uc-line"><span>已用</span><strong>{{ formatTokens(session.usage.contextUsed) }}</strong></div>
+            <div class="uc-line"><span>剩余</span><strong>{{ formatTokens(contextLeft) }}</strong></div>
+            <div class="uc-line"><span>消息数</span><strong>{{ messageCount }}</strong></div>
+            <div class="uc-line"><span>主要占用</span><strong>{{ usageSegments[0]?.label ?? '--' }}</strong></div>
+          </div>
         </div>
+
+        <div v-if="usageSegments.length" class="uc-legend">
+          <span v-for="seg in usageSegments" :key="seg.key" class="uc-legend-item">
+            <i :style="{ background: seg.color }" />{{ seg.label }} {{ seg.percentText }}
+          </span>
+        </div>
+
+        <div v-if="usageSegments.length" class="uc-details">
+          <p class="usage-subtitle">分段明细</p>
+          <div v-for="seg in usageSegments" :key="seg.key" class="uc-detail-row">
+            <span class="uc-detail-label"><i :style="{ background: seg.color }" />{{ seg.label }}</span>
+            <span class="uc-detail-val">{{ seg.percentText }} · {{ formatTokens(seg.tokens) }}</span>
+          </div>
+        </div>
+
+        <div class="uc-stats">
+          <div><span>本轮耗时</span><strong>{{ formatDuration(session.usage.turnElapsedMs) }}</strong></div>
+          <div><span>工具累计</span><strong>{{ formatDuration(toolElapsedMs) }}</strong></div>
+          <div><span>输出速率</span><strong>{{ rateText }}</strong></div>
+          <div><span>会话 Token</span><strong>{{ formatTokens(session.usage.total) }}</strong></div>
+        </div>
+
+        <div class="uc-cache">
+          <span>缓存命中 <strong>{{ formatPercent(session.usage.cacheHitRate) }}</strong></span>
+          <span>本轮 <strong>{{ formatPercent(session.usage.turnCacheHitRate) }}</strong></span>
+          <span>输出 <strong>{{ formatTokens(session.usage.output) }}</strong></span>
+        </div>
+
         <p class="usage-subtitle">各推理强度均轮统计</p>
         <div class="effort-table">
           <div class="effort-head"><span>强度</span><span>命中</span><span>耗时</span><span>用量</span></div>
@@ -327,6 +427,7 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
           </div>
         </div>
       </template>
+      <p v-else class="usage-empty">此对话尚无用量数据</p>
       <div class="usage-path">
         <span>会话标记路径</span>
         <button class="path-btn" @click="openPathPicker">{{ session.cwd || '点击选择' }}</button>
@@ -430,6 +531,39 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
 .effort-head { color: var(--text-3); font-size: 10.5px; }
 .effort-row { border-top: 1px solid var(--border); color: var(--text-2); font-size: 11px; }
 .effort-head span:not(:first-child), .effort-row span:not(:first-child) { text-align: right; }
+/* ── 上下文用量面板（1.6.x 版式）：分段环 + 图例 + 明细 + 统计 ── */
+.uc-top { display: flex; align-items: center; gap: 12px; margin: 6px 0 8px; }
+.uc-ring { position: relative; flex: none; width: 104px; height: 104px; }
+.uc-ring::before { content: ""; position: absolute; inset: 16%; border-radius: 50%; background: color-mix(in srgb, var(--fill) 70%, transparent); }
+.uc-ring-svg { width: 100%; height: 100%; transform: rotate(-90deg) scale(1); transform-origin: 50%; transition: transform .34s cubic-bezier(.22,.68,.19,1), opacity .3s ease; }
+.uc-ring-svg:not(.grown) { transform: rotate(-90deg) scale(.26); opacity: .35; }
+.uc-ring-svg circle { fill: none; }
+.uc-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+.uc-center strong { font-size: 20px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.uc-center span { font-size: 10.5px; color: var(--text-3); }
+.uc-side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.uc-line { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.uc-line span { font-size: 11.5px; color: var(--text-3); }
+.uc-line strong { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+.uc-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; }
+.uc-legend-item { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--text-2); }
+.uc-legend-item i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.uc-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.uc-detail-label { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
+.uc-detail-label i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.uc-detail-val { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.uc-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.uc-stats div { display: flex; flex-direction: column; gap: 2px; }
+.uc-stats span { font-size: 10.5px; color: var(--text-3); }
+.uc-stats strong { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.uc-cache { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
+.uc-cache span { font-size: 10.5px; color: var(--text-3); }
+.uc-cache strong { color: var(--text-2); font-family: var(--font-mono); font-weight: 600; }
+.usage-seg { fill: none; stroke-width: 5px; stroke-linecap: round; transition: stroke-dasharray .5s ease, stroke-dashoffset .5s ease; }
+.usage-ring .usage-seg { stroke-width: 3.8px; }
+.uc-ring-svg .usage-seg { stroke-width: 3.6px; }
+.uc-ring-svg .usage-track { stroke-width: 3.2px; }
+
 .usage-path {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border);

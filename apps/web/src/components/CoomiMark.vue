@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Coomi 品牌标记。
+ * Comax 品牌标记。
  * 形状复刻 assets/coomi-agent.png：同心的四叶星环（两个椭圆求并即为一层花瓣）
  * 加中心浅蓝四角星。用 SVG 而不是位图，闪屏 / 顶栏 / 抽屉可以任意缩放不糊。
  */

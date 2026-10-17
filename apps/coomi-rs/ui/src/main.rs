@@ -39,6 +39,8 @@ mod life;
 mod assistant;
 mod billing;
 mod terminal_ui;
+mod cloud;
+mod cloud_tunnel;
 mod dynwork;
 mod web;
 mod workflow;
@@ -47,11 +49,11 @@ mod workflow;
 #[command(
     name = "coomi",
     version,
-    about = "Coomi terminal coding agent",
+    about = "Comax terminal coding agent",
     subcommand_negates_reqs = true
 )]
 struct Cli {
-    /// Coomi data directory. Defaults to COOMI_HOME or ~/.coomi.
+    /// Comax data directory. Defaults to COOMI_HOME or ~/.coomi.
     #[arg(long, global = true)]
     home: Option<PathBuf>,
 
@@ -376,7 +378,7 @@ fn system_prompt(cwd: &Path, policy: AccessMode, instructions: &str, home: &Path
         prompt.push_str("\n\n");
     }
     prompt.push_str(
-        "You are Coomi, a pragmatic terminal coding agent. Work directly in the user's project. \
+        "You are Comax, a pragmatic terminal coding agent. Work directly in the user's project. \
 Use tools to inspect evidence before editing. Keep changes scoped, preserve unrelated work, and \
 verify implementation results. Never invent tool results.",
     );
@@ -391,7 +393,7 @@ confirmation, authorization, or compliance with any regulations.",
         ),
     }
     prompt.push_str(&format!(
-        "\n\nFilesystem layout:\n- Working directory: {}\n- Coomi home: {}\nAccess policy: {}",
+        "\n\nFilesystem layout:\n- Working directory: {}\n- Comax home: {}\nAccess policy: {}",
         cwd.display(),
         home.display(),
         policy.label()
@@ -403,7 +405,7 @@ confirmation, authorization, or compliance with any regulations.",
         "\nAll file references shown to the user and every path passed to file export must be normalized absolute paths. Never return a relative path for a created, edited, downloaded, referenced, or exported file. Resolve relative tool output against the working directory before presenting it.",
     );
     prompt.push_str(
-        "\nWhen the user asks to install, configure, or repair an MCP server or Skill, use the dedicated configure_mcp or install_skill tool. Diagnose failing commands first, then update the smallest configuration necessary; do not ask the user to edit Coomi JSON manually.",
+        "\nWhen the user asks to install, configure, or repair an MCP server or Skill, use the dedicated configure_mcp or install_skill tool. Diagnose failing commands first, then update the smallest configuration necessary; do not ask the user to edit Comax JSON manually.",
     );
     prompt.push_str(
         "\nBefore any non-trivial task, call list_skills and read_skill for any relevant installed Skill. Follow the Skill after reading it, never claim un-read Skill usage, and skip lookup for simple conversation. User requirements and project instructions take precedence.",
@@ -432,9 +434,9 @@ fn resolve_paths(cli: &Cli) -> Result<RuntimePaths> {
         .clone()
         .or_else(|| env::var_os("COOMI_HOME").map(PathBuf::from))
         .or_else(|| dirs::home_dir().map(|path| path.join(".coomi")))
-        .context("could not determine Coomi home directory")?;
+        .context("could not determine Comax home directory")?;
     std::fs::create_dir_all(&home)
-        .with_context(|| format!("failed to create Coomi home {}", home.display()))?;
+        .with_context(|| format!("failed to create Comax home {}", home.display()))?;
     let home = home.canonicalize()?;
     let cwd = cli
         .cwd

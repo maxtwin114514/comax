@@ -21,7 +21,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Coomi APK asset management.
+ * Comax APK asset management.
  */
 public final class CoomiBootstrap {
 

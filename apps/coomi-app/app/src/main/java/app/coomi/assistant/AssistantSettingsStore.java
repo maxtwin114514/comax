@@ -27,6 +27,8 @@ public final class AssistantSettingsStore {
     private static final String KEY_LANGUAGE = "speech_language";
     private static final String KEY_SYSTEM_FALLBACK = "system_speech_fallback";
     private static final String KEY_SESSION = "control_session";
+    /** 长按电源键唤醒手机助手（0.5s 阈值）。默认开，个别 ROM 会抢电源键时可关掉。 */
+    private static final String KEY_WAKE_LONG_PRESS = "wake_on_long_press";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -42,6 +44,21 @@ public final class AssistantSettingsStore {
 
     public void setEnabled(boolean enabled) {
         preferences.edit().putBoolean(KEY_ENABLED, enabled).apply();
+    }
+
+    /**
+     * 由本应用接管电源键：0.5 秒唤醒助手、按到 3 秒才出关机菜单、短按关屏。
+     *
+     * 为什么默认开着却又要可关：接管意味着系统原生的长按计时不再生效，关屏与电源
+     * 菜单都改由无障碍动作代劳。个别 ROM（部分 HyperOS）根本不给电源键事件，
+     * 或对 performGlobalAction 支持不全 —— 那种机器上应该能一键退回原生行为。
+     */
+    public boolean wakeOnLongPress() {
+        return preferences.getBoolean(KEY_WAKE_LONG_PRESS, true);
+    }
+
+    public void setWakeOnLongPress(boolean enabled) {
+        preferences.edit().putBoolean(KEY_WAKE_LONG_PRESS, enabled).apply();
     }
 
     public String speechProvider() {

@@ -147,6 +147,11 @@
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
                     android:text="@string/coomi_assistant_enable" />
+                <android.widget.Switch
+                    android:id="@+id/switch_assistant_long_press"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:text="@string/coomi_assistant_long_press" />
                 <TextView style="@style/Coomi.Text.Caption" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/coomi_assistant_model_hint" />
                 <Button
                     android:id="@+id/btn_assistant_save"

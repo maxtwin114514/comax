@@ -28,6 +28,9 @@ interface Window {
     getAppVersionCode?(): number
     /** 下载并安装更新 APK（url 为 APK 直链，version 用于文件名/提示）。 */
     installApk?(url: string, version: string): void
+    /** 「更新提醒」开关：关闭后启动时不再弹更新弹窗。 */
+    getUpdateNotifyEnabled?(): boolean
+    setUpdateNotifyEnabled?(enabled: boolean): void
   }
 }
 

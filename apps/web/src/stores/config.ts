@@ -123,11 +123,11 @@ export const PERMISSION_MODES: { mode: PermissionMode; label: string; desc: stri
   { mode: 'ask', label: '询问', desc: '每个写入/破坏性操作前都确认' },
   { mode: 'auto', label: '自动', desc: '读写自动放行，仅破坏性需确认' },
   { mode: 'full', label: '放行', desc: '全部自动执行（仅信任场景）' },
-  { mode: 'minimal', label: '极简', desc: '只提供 shell 工具，适合纯命令行任务' },
+  { mode: 'minimal', label: '极简', desc: '一句话人设 + 只留 shell/看图（对齐 DSH 极简预设）' },
 ]
 
-export type ThemeMode = 'system' | 'light' | 'dark' | 'book' | 'orange' | 'ink' | 'abyss' | 'ember' | 'celadon' | 'linen'
-const THEME_VALUES: ThemeMode[] = ['system', 'light', 'dark', 'book', 'orange', 'ink', 'abyss', 'ember', 'celadon', 'linen']
+export type ThemeMode = 'system' | 'light' | 'dark' | 'book' | 'orange' | 'ink' | 'abyss' | 'ember' | 'celadon' | 'linen' | 'terminal-dark' | 'terminal-light'
+const THEME_VALUES: ThemeMode[] = ['system', 'light', 'dark', 'book', 'orange', 'ink', 'abyss', 'ember', 'celadon', 'linen', 'terminal-dark', 'terminal-light']
 export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'system', label: '跟随系统', desc: '与手机系统深浅色保持一致' },
   { mode: 'light', label: '明亮模式', desc: '始终使用浅色界面' },
@@ -139,6 +139,8 @@ export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'ember', label: '炭褐', desc: '炭黑褐底面与余烬铜色点缀' },
   { mode: 'celadon', label: '青瓷', desc: '青瓷浅灰底面与釉绿色点缀' },
   { mode: 'linen', label: '亚麻', desc: '自然亚麻白底面与沉静靛色点缀' },
+  { mode: 'terminal-dark', label: '终端 · 黑', desc: '全等宽字体；思考过程白色，输出与工具调用橙色' },
+  { mode: 'terminal-light', label: '终端 · 白', desc: '全等宽字体；一律黑字，无彩色点缀' },
 ]
 
 export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
@@ -165,6 +167,12 @@ export function readThemeMode(): ThemeMode {
 
 /** 写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
 export function applyTheme(mode: ThemeMode) {
+  // 终端两版是自带深浅色的显式档位：不能参与 system 的深浅色推断，
+  // 否则系统切深色时会把「终端 · 白」顶成黑底，用户选的档位就失效了。
+  if (mode === 'terminal-dark' || mode === 'terminal-light') {
+    document.documentElement.setAttribute('data-theme', mode)
+    return
+  }
   const dark = mode === 'dark'
     || (mode === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : mode === 'system' ? 'light' : mode)
@@ -409,7 +417,7 @@ export const useConfigStore = defineStore('config', () => {
   function togglePlanMode() { planMode.value = !planMode.value }
 
   /**
-   * 全局会话记忆：关闭（默认）时 Coomi 无法读取任何历史会话文件；
+   * 全局会话记忆：关闭（默认）时 Comax 无法读取任何历史会话文件；
    * 开启后它才能读取所有历史会话记录。历史会话列表始终可见，与本开关无关。
    * 引擎 settings.json 是权威值；localStorage 只是 UI 缓存，启动时以引擎为准。
    */

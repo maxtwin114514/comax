@@ -142,7 +142,7 @@ impl CatalogInstaller {
         self.install_skill_inner(id, false)
     }
 
-    /// Install the Coomi development workflow locally without a network call.
+    /// Install the Comax development workflow locally without a network call.
     /// This is intentionally bundled with the bridge so the entry-point flow
     /// remains usable before GitHub/gh has been configured.
     pub fn install_custom_iteration_skill(&self) -> Result<PathBuf> {
@@ -153,9 +153,9 @@ impl CatalogInstaller {
             &self.home,
             &SkillEntry {
                 id: "coomi-custom-iteration".into(),
-                name: "Coomi Custom Iteration".into(),
-                description: "Safely develop Coomi, submit PRs, or build CoomiDev.".into(),
-                repository: "TensorHub-ORG/Coomi".into(),
+                name: "Comax Custom Iteration".into(),
+                description: "Safely develop Comax, submit PRs, or build CoomiDev.".into(),
+                repository: "TensorHub-ORG/Comax".into(),
                 git_ref: "main".into(),
                 subdir: "".into(),
             },
@@ -178,7 +178,7 @@ impl CatalogInstaller {
                 id: "runtime-environments".into(),
                 name: "Runtime Environments".into(),
                 description: "Route tools across Host, Termux, and ProotLinux without mixing paths or binaries.".into(),
-                repository: "TensorHub-ORG/Coomi".into(),
+                repository: "TensorHub-ORG/Comax".into(),
                 git_ref: "main".into(),
                 subdir: "".into(),
             },

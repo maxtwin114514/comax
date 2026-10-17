@@ -569,7 +569,7 @@ fn read_profile(home: &Path) -> Result<Option<ProfileSnapshot>> {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .filter(|text| !text.is_empty())
-            .unwrap_or_else(|| "Coomi Life".to_owned()),
+            .unwrap_or_else(|| "Comax Life".to_owned()),
         address: value
             .get("address")
             .and_then(Value::as_str)
@@ -698,7 +698,7 @@ fn pick_trigger(profile: &ProfileSnapshot, last_activity_ms: u64, now: u64) -> &
 /// 同一天内按（日期序数 × 已发起次数）轮换变体，避免连续重复同一句。
 fn compose(trigger: &str, profile: &ProfileSnapshot, runtime: &LifeRuntimeState, now: &chrono::DateTime<Local>) -> String {
     let address = if profile.address.is_empty() { "你" } else { &profile.address };
-    let name = if profile.name.is_empty() { "Coomi Life" } else { &profile.name };
+    let name = if profile.name.is_empty() { "Comax Life" } else { &profile.name };
     let bond_pct = (profile.bond * 100.0).round() as u32;
     let timeframe = match now.hour() {
         6..=11 => "morning",

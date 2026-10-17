@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Coomi 夜间主题令牌化（一次性完备版）：
+"""Comax 夜间主题令牌化（一次性完备版）：
 1) colors_coomi.xml：夜间色板对齐前端 dark + 新增夜间颜色（GBK -> UTF-8）
 2) drawable/color/*.xml：@color/coomi_* -> ?attr/coomiXxx
 3) layout：白底/蓝 tint/危险色/分隔线 -> ?attr

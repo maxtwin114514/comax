@@ -140,10 +140,41 @@ public class CoomiLauncherActivity extends Activity {
         });
     }
 
+    /**
+     * 系统把「助手入口」交给本应用的方式（ASSIST 意图，或无障碍长按唤醒后的兜底跳转）。
+     *
+     * 这里必须主动把语音会话弹出来：以前只声明了 ASSIST 入口，系统长按真的把我们
+     * 拉起来了，结果只是打开对话页、什么都不听 —— 用户看到的就是「授权完成后
+     * 长按唤醒不了」。VoiceInteractionService 不在（进程刚被回收）时，先把它拉起来
+     * 再重试一次；仍旧不行就留在对话页，让用户能直接打字。
+     */
+    private void handleAssistantWake() {
+        Intent intent = getIntent();
+        if (intent == null) return;
+        boolean assist = Intent.ACTION_ASSIST.equals(intent.getAction());
+        boolean requested = intent.getBooleanExtra(CoomiAccessibilityService.EXTRA_WAKE_ASSISTANT, false);
+        if (!assist && !requested) return;
+        // 一次性消费，避免屏幕旋转/返回前台时重复弹会话。
+        intent.removeExtra(CoomiAccessibilityService.EXTRA_WAKE_ASSISTANT);
+        intent.setAction(null);
+        try {
+            startService(new Intent(this, CoomiService.class));
+        } catch (Exception ignored) { /* 服务可能已在运行 */ }
+        attemptVoiceSession(0);
+    }
+
+    private void attemptVoiceSession(int attempt) {
+        if (app.coomi.assistant.CoomiVoiceInteractionService.requestVoiceSession()) return;
+        if (attempt >= 6) return;
+        // VoiceInteractionService 由系统绑定，首次要等它 onReady；每 250ms 重试一次。
+        mHandler.postDelayed(() -> attemptVoiceSession(attempt + 1), 250);
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         CoomiTheme.applyPageSystemBars(this);
+        handleAssistantWake();
         if (mSettingsMode) {
             showWelcomePhase();
             updatePermissionStatus();

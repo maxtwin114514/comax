@@ -69,6 +69,9 @@ public final class CoomiTheme {
     public static final String MODE_EMBER = "ember";
     public static final String MODE_CELADON = "celadon";
     public static final String MODE_LINEN = "linen";
+    /** 终端主题两版：全等宽字体，黑/白自成一套配色，不跟随系统深浅色。 */
+    public static final String MODE_TERMINAL_DARK = "terminal-dark";
+    public static final String MODE_TERMINAL_LIGHT = "terminal-light";
 
     public static final String PREF_THEME_MODE = "coomi.themeMode";
     public static final String PREF_DIGITAL_LIFE_ENABLED = "coomi.digitalLifeEnabled";
@@ -130,7 +133,10 @@ public final class CoomiTheme {
             return luminance < 0.45;
         }
         String mode = getMode(context);
-        if (MODE_DARK.equals(mode) || MODE_INK.equals(mode) || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode)) return true;
+        if (MODE_DARK.equals(mode) || MODE_INK.equals(mode) || MODE_ABYSS.equals(mode)
+                || MODE_EMBER.equals(mode) || MODE_TERMINAL_DARK.equals(mode)) return true;
+        // 终端两版自带深浅色，绝不能落到下面的 system 推断里。
+        if (MODE_TERMINAL_LIGHT.equals(mode)) return false;
         if (!MODE_SYSTEM.equals(mode)) return false;
         int night = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         return night == Configuration.UI_MODE_NIGHT_YES;
@@ -140,7 +146,8 @@ public final class CoomiTheme {
         return MODE_SYSTEM.equals(mode) || MODE_LIGHT.equals(mode) || MODE_DARK.equals(mode)
             || MODE_BOOK.equals(mode) || MODE_ORANGE.equals(mode) || MODE_INK.equals(mode)
             || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode) || MODE_CELADON.equals(mode)
-            || MODE_LINEN.equals(mode);
+            || MODE_LINEN.equals(mode)
+            || MODE_TERMINAL_DARK.equals(mode) || MODE_TERMINAL_LIGHT.equals(mode);
     }
 
     /**
@@ -168,6 +175,8 @@ public final class CoomiTheme {
         if (MODE_INK.equals(mode)) return page ? R.style.Theme_Coomi_Ink_Page : web ? R.style.Theme_Coomi_Ink_Web : R.style.Theme_Coomi_Ink;
         if (MODE_ABYSS.equals(mode)) return page ? R.style.Theme_Coomi_Abyss_Page : web ? R.style.Theme_Coomi_Abyss_Web : R.style.Theme_Coomi_Abyss;
         if (MODE_EMBER.equals(mode)) return page ? R.style.Theme_Coomi_Ember_Page : web ? R.style.Theme_Coomi_Ember_Web : R.style.Theme_Coomi_Ember;
+        if (MODE_TERMINAL_DARK.equals(mode)) return page ? R.style.Theme_Coomi_TerminalDark_Page : web ? R.style.Theme_Coomi_TerminalDark_Web : R.style.Theme_Coomi_TerminalDark;
+        if (MODE_TERMINAL_LIGHT.equals(mode)) return page ? R.style.Theme_Coomi_TerminalLight_Page : web ? R.style.Theme_Coomi_TerminalLight_Web : R.style.Theme_Coomi_TerminalLight;
         if (MODE_CELADON.equals(mode)) return page ? R.style.Theme_Coomi_Celadon_Page : web ? R.style.Theme_Coomi_Celadon_Web : R.style.Theme_Coomi_Celadon;
         if (MODE_LINEN.equals(mode)) return page ? R.style.Theme_Coomi_Linen_Page : web ? R.style.Theme_Coomi_Linen_Web : R.style.Theme_Coomi_Linen;
         if (dark) return page ? R.style.Theme_Coomi_Night_Page : web ? R.style.Theme_Coomi_Night_Web : R.style.Theme_Coomi_Night;

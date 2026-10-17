@@ -3,7 +3,7 @@
     <attr name="termuxActivityDrawerBackground" format="reference" />
     <attr name="termuxActivityDrawerImageTint" format="reference" />
 
-    <!-- Coomi 三档主题用的设计令牌：layout 引用 ?attr/coomiXxx，
+    <!-- Comax 三档主题用的设计令牌：layout 引用 ?attr/coomiXxx，
          Theme.Coomi（浅色）与 Theme.Coomi.Night（深色）各给一套值，
          这样「夜间模式」档位不依赖系统 uiMode 也能切换界面颜色。 -->
     <attr name="coomiPage" format="color" />

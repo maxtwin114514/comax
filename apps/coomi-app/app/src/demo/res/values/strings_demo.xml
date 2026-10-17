@@ -4,5 +4,5 @@
   application_name 在 main 里是靠 DOCTYPE 实体拼的，这里整条覆盖掉。
 -->
 <resources>
-    <string name="application_name">Coomi Demo</string>
+    <string name="application_name">Comax Demo</string>
 </resources>

@@ -62,7 +62,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Coomi chat screen — hosts the Vue frontend served by coomi-rs.
+ * Comax chat screen — hosts the Vue frontend served by coomi-rs.
  *
  * The heavy lifting lives in {@link CoomiService}: it deploys the native executable,
  * starts {@code coomi serve} and reports the port it bound to. This activity
@@ -665,6 +665,18 @@ public class CoomiActivity extends Activity {
             return app.coomi.UpdateChecker.currentVersionCode(CoomiActivity.this);
         }
 
+        /** 读取「更新提醒」开关（检查更新页显示当前状态用）。 */
+        @JavascriptInterface
+        public boolean getUpdateNotifyEnabled() {
+            return app.coomi.UpdateChecker.isUpdateNotifyEnabled(CoomiActivity.this);
+        }
+
+        /** 写入「更新提醒」开关：关闭后启动时不再弹更新弹窗。 */
+        @JavascriptInterface
+        public void setUpdateNotifyEnabled(boolean enabled) {
+            app.coomi.UpdateChecker.setUpdateNotifyEnabled(CoomiActivity.this, enabled);
+        }
+
         /** 从 web 检查更新页发起下载并安装（复用更新源的签名校验流程）。 */
         @JavascriptInterface
         public void installApk(String url, String version) {
@@ -730,7 +742,7 @@ public class CoomiActivity extends Activity {
             return "image/png";
         }
 
-        /** API 29+：MediaStore 直写相册（Pictures/Coomi）或下载目录（Download/Coomi）。 */
+        /** API 29+：MediaStore 直写相册（Pictures/Comax）或下载目录（Download/Comax）。 */
         private boolean saveViaMediaStore(boolean toGallery, byte[] bytes, String mime, String fileName) {
             try {
                 ContentValues values = new ContentValues();
@@ -738,7 +750,7 @@ public class CoomiActivity extends Activity {
                 values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
                 values.put(
                     MediaStore.MediaColumns.RELATIVE_PATH,
-                    (toGallery ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS) + "/Coomi");
+                    (toGallery ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS) + "/Comax");
                 Uri collection = toGallery
                     ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                     : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
@@ -855,7 +867,7 @@ public class CoomiActivity extends Activity {
                 try {
                     startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
                     Toast.makeText(CoomiActivity.this,
-                        "请在「已下载的服务」里开启「控制模式：让 Coomi 替你操作屏幕」",
+                        "请在「已下载的服务」里开启「控制模式：让 Comax 替你操作屏幕」",
                         Toast.LENGTH_LONG).show();
                 } catch (Exception error) {
                     Toast.makeText(CoomiActivity.this, "无法打开无障碍设置", Toast.LENGTH_SHORT).show();

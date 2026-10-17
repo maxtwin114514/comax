@@ -73,7 +73,7 @@ const status = ref<LifeStatus | null>(null)
 const busy = ref('')
 const message = ref('')
 const error = ref('')
-const name = ref('Coomi Life')
+const name = ref('Comax Life')
 const address = ref('你')
 const preset = ref('balanced')
 const pendingIdentity = ref<IdentityConfig | null>(null)
@@ -334,7 +334,7 @@ onMounted(() => {
       <p class="sec-label">扩展</p>
       <section class="group status-group">
         <div class="status-row"><span>ProotLinux</span><strong :class="{ ok: status?.runtime_ready }">{{ status?.runtime_ready ? '可用' : '未就绪' }}</strong></div>
-        <div class="status-row"><span>Coomi Life</span><strong :class="{ ok: status?.installed }">{{ status?.installed ? '已安装' : '未安装' }}</strong></div>
+        <div class="status-row"><span>Comax Life</span><strong :class="{ ok: status?.installed }">{{ status?.installed ? '已安装' : '未安装' }}</strong></div>
         <div class="actions">
           <button v-if="!status?.installed && !status?.runtime_ready" class="secondary" :disabled="!!busy" @click="openRuntime"><CoomiIcon name="download" :size="16" />先安装 ProotLinux</button>
           <button v-else-if="!status?.installed" class="primary" :disabled="!!busy" @click="install"><CoomiIcon name="download" :size="16" />安装</button>

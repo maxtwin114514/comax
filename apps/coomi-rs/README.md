@@ -1,6 +1,6 @@
-# Coomi Rust
+# Comax Rust
 
-Coomi is a compact terminal coding agent organized as six workspace layers.
+Comax is a compact terminal coding agent organized as six workspace layers.
 
 | Layer | Responsibility |
 | --- | --- |
@@ -55,7 +55,7 @@ provider that implements `/responses/compact` instead of `compaction_trigger`.
 
 ## Context management
 
-Coomi uses provider usage as the context baseline and estimates local changes
+Comax uses provider usage as the context baseline and estimates local changes
 incrementally. Tool calls remain paired with outputs, oversized outputs are
 trimmed before old history, and real user
 messages are retained around a compacted checkpoint. Context-window errors also

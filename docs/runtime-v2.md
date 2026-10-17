@@ -1,6 +1,6 @@
 # Runtime V2 assets
 
-Runtime V2 keeps the Coomi engine in the Android native process and runs only
+Runtime V2 keeps the Comax engine in the Android native process and runs only
 shell/package workloads inside a PRoot Debian guest. The APK does not contain
 the Debian rootfs. The runtime downloads two SHA-256 and size-verified archives
 described by `runtime-v2-manifest.json`.
@@ -22,7 +22,7 @@ English/Chinese UTF-8 locales.
 Run the `Runtime V2 assets` workflow with the final immutable release-asset URL
 prefix. Publish all three files from its `runtime-v2-release-assets` artifact
 without renaming them. Place the generated manifest at
-`~/.coomi/config/runtime-v2-manifest.json` during staged rollout. Coomi verifies
+`~/.coomi/config/runtime-v2-manifest.json` during staged rollout. Comax verifies
 the manifest schema and both archive hashes before replacing an installed
 runtime; the prior version remains available for rollback.
 

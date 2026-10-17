@@ -1,6 +1,6 @@
 ---
 name: coomi-custom-iteration
-description: Develop Coomi in a private fork, use GitHub Actions to build an isolated CoomiDev APK, submit a PR, or diagnose the optional mobile ARM64 Build Kit.
+description: Develop Comax in a private fork, use GitHub Actions to build an isolated CoomiDev APK, submit a PR, or diagnose the optional mobile ARM64 Build Kit.
 keywords: [coomi, custom, iteration, github, github-actions, actions, git, fork, clone, pull request, apk, coomidev, prootlinux]
 file_types: [rs, vue, ts, java, xml, gradle, md]
 tool_requirements: [shell, local_shell, git, gh, github_actions, cargo, npm, gradle]
@@ -8,7 +8,7 @@ project_types: [coomi, rust, android, vue]
 risks: [network, destructive]
 ---
 
-# Coomi Custom Iteration
+# Comax Custom Iteration
 
 Use the Runtime V2 Debian ProotLinux guest and work only in `~/custom_coomi`.
 Never modify or push the official repository's `main` branch directly.
@@ -18,11 +18,11 @@ Never modify or push the official repository's `main` branch directly.
 - Shell commands run in the ProotLinux guest. `/workspace` is the active Android-host workspace mount and `/home/coomi` is the persistent guest home.
 - Use `/home/coomi/custom_coomi` (equivalent to `~/custom_coomi`) for the source checkout. Do not clone into the engine configuration directory.
 - `/opt/coomi-dev` is the persistent CoomiDev Build Kit mount. Its `current/` directory is the selected immutable toolchain, `bin/` contains Coomi-owned helpers, and `cache/`, `state/`, `logs/`, and `keys/` persist independently from the source checkout.
-- The host Coomi engine home contains `config/`, `skills/`, `sessions/`, `memory/`, `cache/`, `tasks/`, and `runtime-v2/`. Skill discovery reads host `skills/`; MCP definitions read host `config/mcp_servers.json`.
+- The host Comax engine home contains `config/`, `skills/`, `sessions/`, `memory/`, `cache/`, `tasks/`, and `runtime-v2/`. Skill discovery reads host `skills/`; MCP definitions read host `config/mcp_servers.json`.
 - MCP stdio servers are host-engine processes unless their MCP configuration explicitly launches them through ProotLinux. Do not assume an MCP process shares the guest shell's `HOME` or `PATH`.
 - File tools and APK export require Android-host absolute paths. Shell commands use guest paths; `/workspace/<path>` maps to the active host workspace and `/home/coomi/<path>` maps to the Runtime V2 persistent home.
 
-For a Coomi source checkout, preserve these ownership boundaries:
+For a Comax source checkout, preserve these ownership boundaries:
 
 - `apps/coomi-app`: Android shell, dashboard, service lifecycle, APK assets and Gradle packaging.
 - `apps/coomi-rs`: Rust engine, tools, Providers, Skills/MCP catalogs, Runtime V2 and local Web API.
@@ -37,7 +37,7 @@ For a Coomi source checkout, preserve these ownership boundaries:
 1. Confirm `COOMI_RUNTIME_BACKEND=proot_linux`, `git`, and `gh` are available. GitHub Actions is the default APK build route; the phone is an editing and orchestration environment, not the first choice for Android toolchain execution.
 2. Confirm GitHub authentication with `gh auth status`; never print, paste, or save a token in chat, logs, source files, or commits. The account must have permission to dispatch workflows and download artifacts in the user's fork.
 3. Inspect `git status`, the current branch, project rules, and available disk space. Keep at least 6 GiB free for local tests; Actions runners provide the Android build disk space.
-4. Use a feature branch such as `codex/custom-<short-description>` based on the user's request. Keep the fork's `main` and the official `TensorHub-ORG/Coomi:main` untouched.
+4. Use a feature branch such as `codex/custom-<short-description>` based on the user's request. Keep the fork's `main` and the official `TensorHub-ORG/Comax:main` untouched.
 5. Only run `coomidev-build doctor` before a local build attempt or when diagnosing the optional local Build Kit. Do not delay normal GitHub Actions work because the phone does not have ARM64 Android compilers.
 
 ## ARM64 Build Kit invariants
@@ -71,7 +71,7 @@ For repository verification, check the fork, `main` branch, remotes, and clean/e
 
 ## PR delivery
 
-Before pushing, summarize changed files and run the smallest relevant Rust tests, frontend build/type checks, and Android checks. Ask for confirmation immediately before commit, push, or PR creation. Use a PR body with Summary, Changes, Testing, Compatibility, Screenshots, and Risks. The target is `TensorHub-ORG/Coomi:main`, and the head should be the user's fork feature branch.
+Before pushing, summarize changed files and run the smallest relevant Rust tests, frontend build/type checks, and Android checks. Ask for confirmation immediately before commit, push, or PR creation. Use a PR body with Summary, Changes, Testing, Compatibility, Screenshots, and Risks. The target is `TensorHub-ORG/Comax:main`, and the head should be the user's fork feature branch.
 
 ## GitHub Actions CoomiDev delivery (default)
 
@@ -98,7 +98,7 @@ Use this route first because Android's official Linux host tools are generally x
 - Run `npm run type-check` / `npm run build`, the smallest relevant Rust tests, then `COOMI_DEV_BUILD=1 ./gradlew --no-daemon --max-workers=2 :app:assembleRelease`. Keep the checks before packaging so a failed test cannot produce a seemingly valid artifact.
 - Inject release signing through GitHub encrypted secrets or a protected fork environment. The workflow must fail when signing values are missing; never generate or print a private key in a log. For a preview build, use the repository's explicitly documented debug key and label the artifact as a preview.
 - After packaging, use `aapt2 dump badging` or `apkanalyzer` to check `com.coomidev.android`, `CoomiDev`, `arm64-v8a`, and the expected version. Run `apksigner verify --verbose`, then upload a single named artifact such as `coomidev-apk` together with checksums and the run URL.
-- Keep an optional release job behind an explicit input and environment approval. It may create a GitHub Release in the user's fork, but it must never push to or publish from `TensorHub-ORG/Coomi` without an explicitly confirmed release operation.
+- Keep an optional release job behind an explicit input and environment approval. It may create a GitHub Release in the user's fork, but it must never push to or publish from `TensorHub-ORG/Comax` without an explicitly confirmed release operation.
 
 ## CoomiDev delivery (local fallback)
 

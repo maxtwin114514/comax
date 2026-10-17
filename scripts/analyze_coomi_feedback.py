@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read and summarize Coomi feedback files over SSH.
+"""Read and summarize Comax feedback files over SSH.
 
 Usage:
   python scripts/analyze_coomi_feedback.py --ssh-config PATH --output feedback.csv

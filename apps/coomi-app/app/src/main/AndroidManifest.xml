@@ -107,7 +107,7 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- Coomi GUI Components -->
+        <!-- Comax GUI Components -->
         <!-- 这四个界面走 Theme.Coomi（固定浅色），不要跟随 DayNight：values-night 会把白底 UI 翻黑。 -->
         <activity
             android:name="app.coomi.CoomiLauncherActivity"
@@ -118,6 +118,21 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+                助手入口的「旧路子」：Android 10 之前系统的数字助理选择器是按
+                ACTION_ASSIST 枚举应用的，而 MIUI/HyperOS 的数字助理页至今仍沿用
+                这套枚举。只声明 VoiceInteractionService 在部分 ROM 上不出现，
+                补上这个 intent-filter 才有可能被列出来。
+
+                注意：这是加性声明，不影响任何既有入口；但如果 ROM 的选择器是
+                钉死自家助手的（小米把数字助理绑给小爱同学），它依然不会出现 ——
+                那就不是应用侧能解决的问题。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -157,7 +172,7 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.Coomi.Page" />
 
-        <!-- WebView host for the Coomi chat UI served by the bridge -->
+        <!-- WebView host for the Comax chat UI served by the bridge -->
         <activity
             android:name=".app.CoomiActivity"
             android:exported="false"
@@ -177,7 +192,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keep the Coomi engine alive" />
+                android:value="Keep the Comax engine alive" />
         </service>
 
         <!-- 控制模式：桌面悬浮层（工具调用 / 思考过程 + 可拖动小球） -->
@@ -358,7 +373,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keep Coomi terminal sessions alive" />
+                android:value="Keep Comax terminal sessions alive" />
         </service>
 
         <service
@@ -368,7 +383,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keep Coomi terminal sessions alive" />
+                android:value="Keep Comax terminal sessions alive" />
             <intent-filter>
                 <action android:name="${TERMUX_PACKAGE_NAME}.RUN_COMMAND" />
             </intent-filter>

@@ -25,7 +25,7 @@ pub async fn check_for_update(current_version: &str) -> Result<UpdateCheckResult
         .timeout(Duration::from_secs(4))
         .build()?
         .get(LATEST_RELEASE_URL)
-        .header("user-agent", format!("Coomi/{current_version}"))
+        .header("user-agent", format!("Comax/{current_version}"))
         .header("accept", "application/vnd.github+json")
         .send()
         .await?

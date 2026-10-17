@@ -36,6 +36,10 @@ public final class UpdateChecker {
     private static final String UPDATE_URL =
         "https://api.monai.ccwu.cc/coomi/latest.json";
     private static final String TAG = "UpdateChecker";
+    /** 更新提醒开关的持久化位置。放 UpdateChecker 里是因为启动检查时前端还没加载，
+        只有安卓侧的 SharedPreferences 能在那个时间点被读到。 */
+    private static final String PREF_NAME = "coomi_settings";
+    private static final String PREF_UPDATE_NOTIFY = "coomi.updateNotify";
 
     public interface Callback {
         void onResult(boolean hasUpdate, String version, String notes, String error);
@@ -70,6 +74,18 @@ public final class UpdateChecker {
 
     private UpdateChecker() {}
 
+    /** 是否允许在启动时弹出更新提醒。默认开启，保持历史行为。 */
+    public static boolean isUpdateNotifyEnabled(Context context) {
+        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getBoolean(PREF_UPDATE_NOTIFY, true);
+    }
+
+    /** 前端「检查更新」页写入开关；同时刷新控制台上的静默提示。 */
+    public static void setUpdateNotifyEnabled(Context context, boolean enabled) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(PREF_UPDATE_NOTIFY, enabled).apply();
+    }
+
     public static int currentVersionCode(Context context) {
         try {
             return context.getPackageManager()
@@ -96,7 +112,7 @@ public final class UpdateChecker {
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(8000);
                 conn.setReadTimeout(8000);
-                conn.setRequestProperty("User-Agent", "Coomi-Android/" + currentVersionCode(context));
+                conn.setRequestProperty("User-Agent", "Comax-Android/" + currentVersionCode(context));
                 int code = conn.getResponseCode();
                 if (code != 200) {
                     callback.onResult(null, "更新源返回 HTTP " + code);
@@ -142,7 +158,7 @@ public final class UpdateChecker {
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(8000);
                 conn.setReadTimeout(8000);
-                conn.setRequestProperty("User-Agent", "Coomi-Android/" + currentVersionCode(context));
+                conn.setRequestProperty("User-Agent", "Comax-Android/" + currentVersionCode(context));
                 int code = conn.getResponseCode();
                 if (code != 200) {
                     callback.onResult(false, null, null, "更新源返回 HTTP " + code);

@@ -1237,7 +1237,7 @@ fn render_service_settings(frame: &mut Frame<'_>, area: Rect, app: &TuiState) {
             setting_line("Update", &app.update_status),
             setting_line("Provider", &provider),
             setting_line("Access", app.policy.label()),
-            setting_line("Coomi home", &app.home.display().to_string()),
+            setting_line("Comax home", &app.home.display().to_string()),
             setting_line("Workspace", &app.cwd.display().to_string()),
             Line::from(""),
             Line::from(vec![

@@ -684,7 +684,7 @@ function openModelConfig() {
               <label class="model-param"><span>Top-k<small>默认不发送</small></span>
                 <input type="number" min="1" max="65536" step="1" placeholder="默认" :value="modelParams(model).topK ?? ''" @input="updateOptionalNumber(model, 'topK', $event)" />
               </label>
-              <div class="model-param"><span>推理映射<small>Coomi 四档</small></span><button type="button" class="mapping-trigger" @click="toggleModelHelp(model)">{{ reasoningSummary(model) }}</button></div>
+              <div class="model-param"><span>推理映射<small>Comax 四档</small></span><button type="button" class="mapping-trigger" @click="toggleModelHelp(model)">{{ reasoningSummary(model) }}</button></div>
               <label class="model-param model-context"><span>上下文窗口</span>
                 <span class="context-fields">
                   <ThemeSelect
@@ -724,7 +724,7 @@ function openModelConfig() {
               </div>
               <div class="mapping-grid">
                 <label v-for="level in REASONING_LEVELS" :key="level.key">
-                  <span>Coomi {{ level.label }}</span>
+                  <span>Comax {{ level.label }}</span>
                   <input :value="modelParams(model).reasoningMapping?.[level.key] || ''" :placeholder="level.key" @input="updateReasoningMapping(model, level.key, $event)" />
                 </label>
               </div>

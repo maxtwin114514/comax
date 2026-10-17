@@ -1,4 +1,4 @@
-# Coomi Android v1.3.2
+# Comax Android v1.3.2
 
 ## 稳定版更新
 
@@ -13,6 +13,6 @@
 
 ## 下载
 
-- `Coomi-Android-arm64-v1.3.2.apk`
+- `Comax-Android-arm64-v1.3.2.apk`
 - 架构：ARM64 (`arm64-v8a`)
 - 系统要求：Android 7.0 及以上

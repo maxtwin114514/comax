@@ -556,7 +556,7 @@ const COMMANDS: &[CommandItem] = &[
         action: CommandAction::Help,
     },
     CommandItem {
-        label: "Quit Coomi",
+        label: "Quit Comax",
         detail: "Close the terminal UI",
         action: CommandAction::Quit,
     },
@@ -1343,7 +1343,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                 );
             }
             Ok(result) => {
-                app.update_status = format!("Coomi {} is current", result.current_version);
+                app.update_status = format!("Comax {} is current", result.current_version);
             }
             Err(error) => app.update_status = error,
         },
@@ -1768,7 +1768,7 @@ fn auto_config_approval(intent: &AutoConfigIntent) -> (ToolCall, String) {
             name: name.into(),
             arguments,
         },
-        format!("Allow Coomi to apply the detected {subject}?"),
+        format!("Allow Comax to apply the detected {subject}?"),
     )
 }
 

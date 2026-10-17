@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coomi Life JSON-RPC stdio sidecar.
+"""Comax Life JSON-RPC stdio sidecar.
 
 Substantially modified implementation informed by the PSI state concepts in
 LAAP AGI at commit fe98e1e61adefe5899a01db561143ee8f8c45086.
@@ -133,11 +133,11 @@ def atomic_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def default_state(name: str = "Coomi Life", address: str = "you", preset: str = "balanced") -> dict[str, Any]:
+def default_state(name: str = "Comax Life", address: str = "you", preset: str = "balanced") -> dict[str, Any]:
     preset = preset if preset in PERSONALITY_PRESETS else "balanced"
     return {
         "version": STATE_VERSION,
-        "name": bounded(name, 48) or "Coomi Life",
+        "name": bounded(name, 48) or "Comax Life",
         "address": bounded(address, 48) or "you",
         "preset": preset,
         "paused": False,

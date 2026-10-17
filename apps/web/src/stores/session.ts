@@ -26,6 +26,15 @@ export const useSessionStore = defineStore('session', () => {
   const timeline = ref<Timelineitem[]>(sessions.loadTranscript(sessionId.value))
   /** 权威快照整体替换时间线时递增，滚动层据此重新测量并置底。 */
   const viewRevision = ref(0)
+  /**
+   * 正在从引擎拉权威快照。
+   *
+   * 进入会话时会先拿本机 localStorage 里的记录顶上（立即可见），随后引擎快照到达、
+   * 整条时间线被替换 —— 两次渲染对应两个不同的内容高度，滚动又被置底两次，
+   * 用户看到的就是「上下闪一下」。滚动层据此在恢复期间先把内容藏起来，
+   * 等唯一一次置底完成后再显形。
+   */
+  const restoring = ref(false)
   const runState = ref<RunState>('idle')
   const usage = ref<{
     total: number; input: number; output: number; contextRatio: number
@@ -91,6 +100,23 @@ export const useSessionStore = defineStore('session', () => {
   const hiddenEvents = new Map<string, AgentEvent[]>()
   const restoringSessions = new Set<string>()
   const appliedThrough = new Map<string, number>()
+  /** 增量堆爆、必须退回整份引擎快照恢复的会话。 */
+  const needsSnapshot = new Set<string>()
+  /** 单个会话最多缓存多少条待应用事件（超出即退回快照恢复）。 */
+  const DEFERRED_EVENT_LIMIT = 3000
+
+  /** 把事件挂到某个会话的待应用队列上，等它回到前台再一次性应用。 */
+  const deferFor = (id: string, payload: AgentEvent) => {
+    const pending = hiddenEvents.get(id) ?? []
+    pending.push(payload)
+    // 兜底上限：真堆爆了就丢掉最早的一段并标记需要整份快照恢复 ——
+    // 引擎侧的会话快照才是权威，丢掉增量不会丢历史。
+    if (pending.length > DEFERRED_EVENT_LIMIT) {
+      pending.splice(0, pending.length - DEFERRED_EVENT_LIMIT)
+      needsSnapshot.add(id)
+    }
+    hiddenEvents.set(id, pending)
+  }
   /** 池上限：防止长时间使用后连接无限增长（每个连接 + 引擎事件缓冲都占内存）。 */
   const TRANSPORT_POOL_MAX = 5
   let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -125,11 +151,11 @@ export const useSessionStore = defineStore('session', () => {
 
   /** 发送内置引导（EmptyState 引导卡）：先置用户标题消息，再让引擎流式推正文。 */
   const GUIDE_TITLES: Record<string, string> = {
-    newbie: 'Coomi 新手使用指南',
+    newbie: 'Comax 新手使用指南',
     extension: '自定义拓展进化指南',
   }
   function sendGuide(key: string) {
-    const trimmed = (GUIDE_TITLES[key] ?? 'Coomi 指南').trim()
+    const trimmed = (GUIDE_TITLES[key] ?? 'Comax 指南').trim()
     // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
@@ -219,7 +245,15 @@ export const useSessionStore = defineStore('session', () => {
     })
     t.onMessage(env => {
       // 只过滤「前台会话」：后台会话的事件照常 ack（引擎继续跑），但不刷新前台 UI。
+      // 「这批事件能不能现在就画到界面上」有三种情况都算不能，处理方式必须一致：
+      // 缓存起来等它回到前台再一次性应用，绝不 ACK 完就丢。
+      //   1. 页面隐藏（切后台/锁屏）；
+      //   2. 该会话正在做引擎快照恢复；
+      //   3. 该会话此刻不在前台（用户切到别的会话去了）。
+      // 第 3 种是「切换会话后上一个会话看着像停了」的真凶：事件被 ack 掉又没落到
+      // 任何时间线上，切回来只剩残缺的回放，看起来就像那轮执行被丢了。
       const isForeground = sessionId.value === targetSessionId
+      const canPaintNow = isForeground && !document.hidden && !restoringSessions.has(targetSessionId)
       if (env.type === 'event' && env.payload.event_seq) {
         const seq = env.payload.event_seq
         if (seq <= Math.max(lastEventSeq, appliedThrough.get(targetSessionId) ?? 0)) {
@@ -227,25 +261,18 @@ export const useSessionStore = defineStore('session', () => {
           return
         }
         lastEventSeq = seq
-        // 页面隐藏时仍 ACK，但把事件留在内存；恢复时同一批应用，避免把磁盘上
-        // 尚未落盘的半轮工具误判成“已取消”，也避免返回后逐字补动画。
-        if (isForeground) {
-          if (document.hidden || restoringSessions.has(targetSessionId)) {
-            const pending = hiddenEvents.get(targetSessionId) ?? []
-            pending.push(env.payload)
-            hiddenEvents.set(targetSessionId, pending)
-          } else onInbound(env)
-        }
+        if (canPaintNow) onInbound(env)
+        else deferFor(targetSessionId, env.payload)
         t.send({ command: 'ack_event', event_seq: seq })
         return
       }
-      if (isForeground) {
-        if ((document.hidden || restoringSessions.has(targetSessionId)) && env.type === 'event') {
-          const pending = hiddenEvents.get(targetSessionId) ?? []
-          pending.push(env.payload)
-          hiddenEvents.set(targetSessionId, pending)
-        } else if (!document.hidden) onInbound(env)
+      if (!isForeground) return
+      if (env.type === 'event') {
+        if (canPaintNow) onInbound(env)
+        else deferFor(targetSessionId, env.payload)
+        return
       }
+      if (!document.hidden) onInbound(env)
     })
     t.connect()
   }
@@ -405,7 +432,18 @@ export const useSessionStore = defineStore('session', () => {
         }
         break
       }
-            case 'compression': pushNotice('info', `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}`); break
+            case 'compression': {
+              // 压缩摘要必须在「压缩发生的那一刻」给用户看：这是唯一能看到
+              // 模型把旧上下文压成了什么的机会。原来只在重进会话时由历史
+              // 反推出来，等于用户在当下完全不知情。
+              const detail = (ev.summary ?? '').trim()
+              pushNotice(
+                'info',
+                `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}${detail ? ' · 点击查看摘要' : ''}`,
+                detail || undefined,
+              )
+              break
+            }
       case 'connection_retry': connection.setRetry(`${ev.message}（${ev.attempt}/${ev.max_attempts}）`); break
       case 'stream_reset':
         endAssistantStream()
@@ -712,6 +750,7 @@ export const useSessionStore = defineStore('session', () => {
   async function restoreFromEngine(id: string): Promise<boolean> {
     if (restoringSessions.has(id)) return false
     restoringSessions.add(id)
+    if (sessionId.value === id) restoring.value = true
     try {
       let res = await authedFetch(`/api/sessions/${id}/snapshot`)
       if (!res.ok) res = await authedFetch(`/api/sessions/${id}`)
@@ -753,9 +792,11 @@ export const useSessionStore = defineStore('session', () => {
       return false
     } finally {
       restoringSessions.delete(id)
+      if (sessionId.value === id) restoring.value = false
       // An unavailable API must not lose events captured during the request.
       if (sessionId.value === id && !document.hidden) {
-        const pending = hiddenEvents.get(id) ?? []
+        const overflowed = needsSnapshot.delete(id)
+        const pending = overflowed ? [] : hiddenEvents.get(id) ?? []
         hiddenEvents.delete(id)
         for (const event of pending) applyEvent(event)
       }
@@ -770,12 +811,21 @@ export const useSessionStore = defineStore('session', () => {
     for (const m of messages) {
       if (m.internal) continue
       if (m.compaction_summary) {
-        items.push({ kind: 'notice', id: nextId(), tone: 'info', text: '（上下文已压缩 · 点击查看摘要）', detail: m.content ?? '' })
+        // 历史里的压缩摘要不再渲染成提示。
+        //
+        // 它已经在压缩发生的那一刻提示过了（见 compression 事件），重进会话再
+        // 弹一次会让人以为「刚刚又压缩了一轮」—— 用户看到的正是这个误会。
+        // 摘要正文本身仍留在引擎历史里，需要时可通过 /memory 或会话快照查看。
         continue
       }
       if (m.role === 'user') {
         items.push({ kind: 'user', id: nextId(), mid: m.id ?? '', content: m.content })
       } else if (m.role === 'assistant') {
+        // 思考过程先于正文：和实时流里的顺序一致（先 reasoning_chunk 再 text_chunk）。
+        // 退出应用再进来能重新看到思考过程，靠的就是引擎把 reasoning 一起写进了会话文件。
+        if (m.reasoning && m.reasoning.trim()) {
+          items.push({ kind: 'reasoning', id: nextId(), content: m.reasoning, expanded: false })
+        }
         if (m.content) items.push({ kind: 'assistant', id: nextId(), mid: m.id ?? '', content: m.content, streaming: false, life: m.life_proactive === true })
         for (const tc of m.tool_calls ?? []) {
           items.push({
@@ -854,6 +904,8 @@ export const useSessionStore = defineStore('session', () => {
   /** Android 后台返回：优先把隐藏期间缓存的事件一次性应用；进程重建才读磁盘快照。 */
   async function resumeFromBackground(): Promise<boolean> {
     const id = sessionId.value
+    // 增量已溢出的会话不能只回放增量，必须让引擎给一份权威快照。
+    if (needsSnapshot.has(id)) return restoreFromEngine(id)
     const pending = hiddenEvents.get(id) ?? []
     if (pending.length > 0 && !restoringSessions.has(id)) {
       hiddenEvents.delete(id)
@@ -975,11 +1027,11 @@ export const useSessionStore = defineStore('session', () => {
   function patchQuestion(callId: string, fn: (q: QuestionCard) => void) {
     for (let i = timeline.value.length - 1; i >= 0; i--) { const t = timeline.value[i]; if (t.kind === 'question' && t.callId === callId) { fn(t); return } }
   }
-  function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
+  function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string, detail?: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text, detail }) }
 
   function toggleLifeStats() { lifeStatsOpen.value = !lifeStatsOpen.value }
 
-  return { sessionId, mode, timeline, viewRevision, runState, usage, plan, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, restoreFromEngine, resumeFromBackground, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
+  return { sessionId, mode, timeline, viewRevision, restoring, runState, usage, plan, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, restoreFromEngine, resumeFromBackground, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
@@ -1098,6 +1150,8 @@ interface ChatMessageJson {
   internal?: boolean
   life_proactive?: boolean
   images?: Array<{ media_type: string; data: string }>
+  /** 引擎落盘的思考过程：重进会话时据此还原「思考过程」块。 */
+  reasoning?: string
 }
 
 function createSessionId(): string {

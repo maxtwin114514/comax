@@ -10,6 +10,8 @@ import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
+import android.content.Intent;
+import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -33,6 +35,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class CoomiAccessibilityService extends AccessibilityService {
 
+    /** 长按唤醒时带给对话页的标记：进来后直接进入语音输入姿态。 */
+    public static final String EXTRA_WAKE_ASSISTANT = "coomi_wake_assistant";
+
     private static volatile CoomiAccessibilityService instance;
 
     /** 最近一次窗口状态变化的前台包名；事件驱动，不需要轮询。 */
@@ -46,6 +51,54 @@ public final class CoomiAccessibilityService extends AccessibilityService {
     private volatile boolean queueRunning = false;
     private Thread queueThread;
     private volatile FileObserver fileObserver;
+
+    /**
+     * 电源键三段式（1.5.2o8beta 用户要求）。
+     *
+     * 用户实测的问题：以前按下不消费，系统自己的长按（关机菜单）在 ~0.5s 就先弹出来了，
+     * 结果"先唤醒的是重启键"，助手反而在后。所以现在**按下就吞掉**，由我们决定：
+     *
+     *   0  ──500ms──▶ 唤醒手机助手（继续按也不会重入）
+     *   500ms ──3000ms──▶ 保持助手，不再做别的
+     *   3000ms ─▶ 调 GLOBAL_ACTION_POWER_DIALOG 主动弹出系统电源菜单（关机/重启）
+     *   松手时不足 500ms ─▶ 当成短按：关屏（API 28+ 用 GLOBAL_ACTION_LOCK_SCREEN）
+     *
+     * 代价与边界（必须如实写在这里，避免以后有人以为它万能）：
+     * - 吞掉按下之后，**系统的原生计时不再生效**，所以关屏/电源菜单都由我们代劳；
+     *   API < 28 没有 GLOBAL_ACTION_LOCK_SCREEN，短按关屏做不到，只能放弃拦截
+     *   （见 {@link #canOwnPowerKey()}），保持系统原生行为；
+     * - 部分 ROM 的电源键根本不进无障碍（HyperOS 等），收不到事件就等于没这个功能；
+     * - 仍有 ROM 会在 input filter 之后自行弹菜单，我们会在极短窗口内尝试关掉它
+     *   （见 {@link #dismissSystemPowerDialogIfOurs}）。
+     */
+    private static final long POWER_LONG_PRESS_MS = 500L;
+    /** 继续按住到这个时长，才弹系统的关机/重启菜单。 */
+    private static final long POWER_POWER_MENU_MS = 3000L;
+    /** 按下时刻；0 表示当前没有按下的电源键。 */
+    private long powerDownAt = 0L;
+    /** 本次长按是否已经唤醒过助手（避免 repeat 事件重复唤醒）。 */
+    private boolean powerWoke = false;
+    /** 本次长按是否已经弹出过电源菜单。 */
+    private boolean powerMenuShown = false;
+    /** 我们自己处理电源键的时间窗；用于判断"刚弹出来的系统菜单是不是我们引起的"。 */
+    private volatile long powerHandledAt = 0L;
+
+    private final Handler powerHandler = new Handler(Looper.getMainLooper());
+    private final Runnable powerWakeTask = () -> {
+        if (powerDownAt == 0L || powerWoke) return;
+        powerWoke = true;
+        powerHandledAt = android.os.SystemClock.elapsedRealtime();
+        wakeAssistant();
+    };
+    private final Runnable powerMenuTask = () -> {
+        if (powerDownAt == 0L || powerMenuShown) return;
+        powerMenuShown = true;
+        powerHandledAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            // 6 = GLOBAL_ACTION_POWER_DIALOG（API 21+，无障碍服务合法能力）
+            performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+        } catch (Exception ignored) { /* 个别 ROM 不实现该动作 */ }
+    };
 
     /** describeScreen 缓存（150ms） */
     private final Object screenCacheLock = new Object();
@@ -89,11 +142,127 @@ public final class CoomiAccessibilityService extends AccessibilityService {
             info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
             info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
                 | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-                | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
+                | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+                // 申请按键过滤：只有拿到这个能力，下面的 onKeyEvent 才会被回调，
+                // 长按电源键唤醒才有实现的基础。ROM 不给就永远收不到事件，不影响其它功能。
+                | AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
             info.notificationTimeout = 80;
             setServiceInfo(info);
         }
         startQueue();
+    }
+
+    // ── 长按电源键唤醒手机助手 ───────────────────────────────────────────
+
+    /**
+     * 电源键三段式拦截（0.5s 唤醒助手 / 3s 弹电源菜单 / 短按关屏）。
+     *
+     * 为什么要吞掉 KEY_DOWN：系统的长按关机菜单是在自己的时序里弹的，只拦 KEY_UP
+     * 根本来不及 —— 用户实测就是「先弹重启菜单，助手在后」。吞掉按下之后由我们用
+     * 定时器决定节奏，系统的电源菜单改由 GLOBAL_ACTION_POWER_DIALOG 显式唤起，
+     * 正好对应用户要的「按到 3 秒才出关机/重启」。
+     *
+     * 只要用户没开「长按电源键唤醒」或无障碍不给能力，这里一律 return false，
+     * 电源键保持系统原生行为 —— 绝不因为我们的 bug 让用户关不了屏。
+     */
+    @Override protected boolean onKeyEvent(KeyEvent event) {
+        if (event == null || event.getKeyCode() != KeyEvent.KEYCODE_POWER) return false;
+        if (!shouldOwnPowerKey()) return false;
+
+        switch (event.getAction()) {
+            case KeyEvent.ACTION_DOWN: {
+                if (event.getRepeatCount() > 0) {
+                    // 连发事件也吞掉：否则系统会拿它做自己的长按计时。
+                    return true;
+                }
+                powerDownAt = android.os.SystemClock.elapsedRealtime();
+                powerWoke = false;
+                powerMenuShown = false;
+                powerHandledAt = powerDownAt;
+                powerHandler.removeCallbacks(powerWakeTask);
+                powerHandler.removeCallbacks(powerMenuTask);
+                powerHandler.postDelayed(powerWakeTask, POWER_LONG_PRESS_MS);
+                powerHandler.postDelayed(powerMenuTask, POWER_POWER_MENU_MS);
+                return true;
+            }
+            case KeyEvent.ACTION_UP: {
+                long downAt = powerDownAt;
+                powerDownAt = 0L;
+                powerHandler.removeCallbacks(powerWakeTask);
+                powerHandler.removeCallbacks(powerMenuTask);
+                if (downAt == 0L) return true;
+                long held = android.os.SystemClock.elapsedRealtime() - downAt;
+                if (held < POWER_LONG_PRESS_MS && !powerWoke && !powerMenuShown) {
+                    // 短按：我们吞了按下，就得自己把屏幕关上。
+                    powerHandledAt = android.os.SystemClock.elapsedRealtime();
+                    lockScreenForShortPress();
+                }
+                // 长按路径（唤醒助手 / 已弹菜单）不需要额外动作，直接消费抬起。
+                return true;
+            }
+            default:
+                return true;
+        }
+    }
+
+    /** 短按电源键：API 28+ 走无障碍的锁屏动作，更低版本只能放弃拦截（见调用点）。 */
+    private void lockScreenForShortPress() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return;
+        try {
+            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
+        } catch (Exception ignored) { /* 个别 ROM 未实现 */ }
+    }
+
+    /**
+     * 我们是否可以安全地"接管"电源键。
+     *
+     * 必须同时满足：用户开启了手机助手与长按唤醒；系统版本够高（API 28+ 才有锁屏动作，
+     * 否则短按关屏做不到，接管后用户会关不了屏）；无障碍确实收到了按键事件。
+     */
+    private boolean shouldOwnPowerKey() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false;
+        try {
+            app.coomi.assistant.AssistantSettingsStore settings =
+                new app.coomi.assistant.AssistantSettingsStore(this);
+            return settings.isEnabled() && settings.wakeOnLongPress();
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    /**
+     * 极少数 ROM 会在 input filter 之后仍然自行弹出电源菜单。
+     *
+     * 只在我们"自己刚动过电源键"的 1.2 秒窗口内、且前台确实是系统的 global actions
+     * 时，才尝试用返回键关掉它 —— 用户自己按出来的菜单绝不会被我们关。
+     */
+    private void dismissSystemPowerDialogIfOurs() {
+        long handledAt = powerHandledAt;
+        if (handledAt == 0L) return;
+        if (android.os.SystemClock.elapsedRealtime() - handledAt > 1200L) return;
+        String pkg = foregroundPackage;
+        if (pkg == null) return;
+        boolean systemUi = pkg.equals("com.android.systemui") || pkg.equals("android");
+        if (!systemUi) return;
+        try {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+        } catch (Exception ignored) { /* 关不掉就算了，不能让异常冒到事件循环 */ }
+    }
+
+    /** @return true 表示已经把唤醒请求交出去（可以安全地消费事件）。 */
+    private boolean wakeAssistant() {
+        // 系统规定只有 VoiceInteractionService 自己能弹语音会话；先找它。
+        if (app.coomi.assistant.CoomiVoiceInteractionService.requestVoiceSession()) return true;
+        // 兜底：直接开对话页。至少用户按下长按后确实有反应，而不是什么都不动。
+        try {
+            Intent launch = new Intent(this, CoomiLauncherActivity.class);
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            launch.putExtra(EXTRA_WAKE_ASSISTANT, true);
+            startActivity(launch);
+            return true;
+        } catch (Exception error) {
+            return false;
+        }
     }
 
     // ── 命令队列 ────────────────────────────────────────────────────────
@@ -392,6 +561,9 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         foregroundUpdatedAt = System.currentTimeMillis();
         recentPackages.addFirst(name);
         while (recentPackages.size() > 8) recentPackages.removeLast();
+        // 少数 ROM 会在我们的按键过滤之后仍然弹自己的电源菜单：只在自己刚动过
+        // 电源键的窗口内、且前台是系统界面时才关掉它（绝不干扰用户自己按出来的）。
+        dismissSystemPowerDialogIfOurs();
     }
 
     @Override
@@ -407,6 +579,10 @@ public final class CoomiAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        // 电源键定时器必须先清：服务被系统回收后定时器若还在跑，就会去 performGlobalAction
+        // 一个已经失效的服务实例。
+        powerHandler.removeCallbacksAndMessages(null);
+        powerDownAt = 0L;
         queueRunning = false;
         if (queueThread != null) {
             queueThread.interrupt();

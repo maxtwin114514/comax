@@ -172,7 +172,7 @@ pub fn solve_challenge(ch: &PowChallenge) -> Result<PowSolution> {
 /// → Java 侧 CoomiPowService 轮询到后调官方原生库 → 写回 `<id>.result.json` → 本函数读回。
 /// 与无障碍命令队列同一模式，只多一层「本地计算」，不需要网络。
 fn official_solve(ch: &PowChallenge) -> Result<f64> {
-    let home = crate::deepseek::pow::pow_queue_home().ok_or_else(|| anyhow!("无 Coomi home"))?;
+    let home = crate::deepseek::pow::pow_queue_home().ok_or_else(|| anyhow!("无 Comax home"))?;
     let dir = home.join("control").join("pow");
     std::fs::create_dir_all(&dir)?;
     let stamp = std::time::SystemTime::now()

@@ -188,7 +188,7 @@ class StatsStore:
 
 
 store = StatsStore(DATABASE_URL)
-app = FastAPI(title="Coomi Website Statistics", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Comax Website Statistics", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.middleware("http")

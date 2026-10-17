@@ -423,6 +423,14 @@ onBeforeUnmount(() => {
   width: 30px; height: 30px; border-radius: 9px;
   background: var(--fill-strong); color: var(--text-2);
 }
+/* 终端主题：工具调用的可读文字走 --term-tool（黑版为橙色）。
+   图标底色 .tile 与状态徽标 .st 保留各自的语义色，否则运行中/失败就看不出来了。 */
+:root[data-theme='terminal-dark'] .tool .verb,
+:root[data-theme='terminal-dark'] .tool .target,
+:root[data-theme='terminal-light'] .tool .verb,
+:root[data-theme='terminal-light'] .tool .target {
+  color: var(--term-tool);
+}
 .tile.run { background: var(--blue-soft); color: var(--blue); }
 .tile.ok { background: var(--ok-soft); color: var(--ok); }
 .tile.err { background: var(--danger-soft); color: var(--danger); }

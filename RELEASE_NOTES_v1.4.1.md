@@ -1,4 +1,4 @@
-# Coomi Android v1.4.1
+# Comax Android v1.4.1
 
 ## 更新说明【稳定】
 

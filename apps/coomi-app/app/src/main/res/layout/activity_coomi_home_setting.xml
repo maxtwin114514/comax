@@ -1,5 +1,5 @@
 <!--
-    Coomi 启动首页设置二级页面：CoomiHomeSettingActivity。
+    Comax 启动首页设置二级页面：CoomiHomeSettingActivity。
     选择打开 App 时进入控制台还是对话界面，风格与 Dashboard/Backup 一致。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

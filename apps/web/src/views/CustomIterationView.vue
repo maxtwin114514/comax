@@ -11,7 +11,7 @@ const session = useSessionStore()
 const busy = ref(false)
 const error = ref('')
 
-const PROMPT = `我准备在 Coomi 的手机虚拟 Linux 环境中进行 Coomi 自定义迭代。
+const PROMPT = `我准备在 Comax 的手机虚拟 Linux 环境中进行 Comax 自定义迭代。
 
 开始后，你的第一个任务是先询问我本次使用 GitHub 还是 Gitee 作为开源协作平台（GitHub 仓库：https://github.com/TensorHub-ORG/Coomi；Gitee 仓库：https://gitee.com/tensorhub/coomi），确认后再按所选平台执行下面的步骤。
 
@@ -31,9 +31,9 @@ const PROMPT = `我准备在 Coomi 的手机虚拟 Linux 环境中进行 Coomi �
 
 配置完成后，请按以下顺序验证：
 1. 验证所选平台登录状态和 SSH 连接。
-2. 为所选平台的 Coomi 仓库点星（GitHub https://github.com/TensorHub-ORG/Coomi 或 Gitee https://gitee.com/tensorhub/coomi）。
+2. 为所选平台的 Comax 仓库点星（GitHub https://github.com/TensorHub-ORG/Coomi 或 Gitee https://gitee.com/tensorhub/coomi）。
 3. Fork 该仓库的 main 分支。
-4. 将仓库的 main 分支克隆到 Coomi 虚拟 Linux 环境中的 ~/custom_coomi。
+4. 将仓库的 main 分支克隆到 Comax 虚拟 Linux 环境中的 ~/custom_coomi。
 5. 检查仓库、分支、远程地址和工作区状态。
 
 之后，请按照 coomi-custom-iteration Skill 的规则协助我进行自定义开发。每次修改前先检查项目规则、当前分支和工作区状态；完成后运行适当的测试。
@@ -44,7 +44,7 @@ const PROMPT = `我准备在 Coomi 的手机虚拟 Linux 环境中进行 Coomi �
 3. 推送分支后触发工作流并持续等待（GitHub 使用 gh workflow list、gh workflow run、gh run rerun 与 gh run watch --exit-status；Gitee 使用 Gitee Go 的流水线触发），不要只看旧运行记录。
 4. 失败时先获取失败步骤日志（GitHub 使用 gh run view --log-failed；Gitee 使用控制台构建日志），区分依赖、架构、签名、缓存和源码错误；修复后重新提交并重新触发，不要盲目重复运行。
 5. 成功后下载 APK artifact，校验包名 com.coomidev.android、应用名 CoomiDev、端口 18765、ABI 和签名，再提供给用户安装；PR 和 APK 构建可以是两个独立工作流。
-6. 若用户选择发布，先在 fork 的分支完成验收，再按 Skill 规范提交 PR 到所选平台的官方仓库 main（GitHub TensorHub-ORG/Coomi 或 Gitee tensorhub/coomi）。未经用户明确确认，不执行 push、发布 Release 或创建 PR。
+6. 若用户选择发布，先在 fork 的分支完成验收，再按 Skill 规范提交 PR 到所选平台的官方仓库 main（GitHub TensorHub-ORG/Comax 或 Gitee tensorhub/coomi）。未经用户明确确认，不执行 push、发布 Release 或创建 PR。
 
 若用户明确要求手机本地构建，才将涉及的构建配置 Linux 化：使用 POSIX 路径与命令，移除 npm.cmd、.cmd、Windows 盘符、反斜杠和 windows-x86_64 硬编码，同时保留 Windows 主机检测与环境变量覆盖。依次执行 doctor、Android APK 冒烟测试、Rust/NDK 冒烟测试、完整构建；完整包必须为 CoomiDev、包名 com.coomidev.android、默认端口 18765，并使用 assets/coomi-agent-dev.png。全部通过后再验证包名和签名并导出 APK。如果真实 ARM64 工具链无法验证，立即停止本地构建并回到所选平台的 CI，不要绕过检查。`
 
@@ -80,8 +80,8 @@ function goDashboard() {
     <main class="body">
       <section class="hero">
         <h1>全面自定义自己的 CoomiDev</h1>
-        <p>Coomi 是由 TensouHub 开源组织维护的 Agent 基座项目。我们非常欣喜地看到，Coomi-Android 收获了很多用户的认可与喜爱。开源生态之所以称为“开源”，也是因为众多开发者始终愿意共建、共享，相互交流、认可。</p>
-        <p>为此，我们开放自定义迭代能力，从零开始引导用户迈入开源社区，让每一位爱好者都有机会亲手打造属于自己的 Coomi，同时也能为社区提供独特的创新与改进。</p>
+        <p>Comax 是由 TensouHub 开源组织维护的 Agent 基座项目。我们非常欣喜地看到，Comax-Android 收获了很多用户的认可与喜爱。开源生态之所以称为“开源”，也是因为众多开发者始终愿意共建、共享，相互交流、认可。</p>
+        <p>为此，我们开放自定义迭代能力，从零开始引导用户迈入开源社区，让每一位爱好者都有机会亲手打造属于自己的 Comax，同时也能为社区提供独特的创新与改进。</p>
       </section>
       <section class="prep">
         <div class="section-head"><h2>我们为你提供</h2><span>一次准备，持续共建</span></div>
@@ -96,7 +96,7 @@ function goDashboard() {
           </article>
             <article class="feature">
             <span class="feature-icon"><CoomiIcon name="globe" :size="17" /></span>
-              <span><b>Git开源生态社区</b><small>对于用户的所有迭代和改进，Coomi都会提示你，引导你按规范提交PR和封装自己的APK</small></span>
+              <span><b>Git开源生态社区</b><small>对于用户的所有迭代和改进，Comax都会提示你，引导你按规范提交PR和封装自己的APK</small></span>
           </article>
         </div>
       </section>

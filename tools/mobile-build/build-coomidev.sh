@@ -54,7 +54,7 @@ rust_smoke() {
 full_build() {
     doctor
     repo_root=$(find_repo_root) || {
-        printf '[error] run this command inside a Coomi source checkout\n' >&2
+        printf '[error] run this command inside a Comax source checkout\n' >&2
         exit 1
     }
     cd "$repo_root"

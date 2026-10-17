@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    Coomi 鎺у埗鍙帮細娴呯伆椤甸潰 + 鐧借壊鍒嗙粍鍗＄墖锛圖eepSeek 璁剧疆椤电殑鎺掔増璇█锛夈€?    ID 涓?CoomiDashboardActivity 瀵瑰簲锛歞ashboard_status_indicator / dashboard_status_text /
+    Comax 鎺у埗鍙帮細娴呯伆椤甸潰 + 鐧借壊鍒嗙粍鍗＄墖锛圖eepSeek 璁剧疆椤电殑鎺掔増璇█锛夈€?    ID 涓?CoomiDashboardActivity 瀵瑰簲锛歞ashboard_status_indicator / dashboard_status_text /
     dashboard_runtime_version / btn_open_chat / btn_restart / btn_stop /
     btn_open_terminal / btn_open_tui / btn_open_webui / webui_button_container銆?-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

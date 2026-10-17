@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Coomi 对话宿主：白色品牌闪屏盖在 WebView 之上，引擎就绪、页面加载完成后整块隐藏。
+    Comax 对话宿主：白色品牌闪屏盖在 WebView 之上，引擎就绪、页面加载完成后整块隐藏。
     coomi_webview / coomi_splash / coomi_loading_text / coomi_loading_detail /
     btn_coomi_retry 由 CoomiActivity 引用。
 -->

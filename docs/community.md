@@ -1,6 +1,6 @@
 # 社区注册表与匿名统计
 
-Coomi 的「市场」是 TensorHub 社区注册表（[coomi-registry](https://github.com/TensorHub-ORG/coomi-registry)）的 App 内入口。本页说明它的工作方式与隐私边界。
+Comax 的「市场」是 TensorHub 社区注册表（[coomi-registry](https://github.com/TensorHub-ORG/coomi-registry)）的 App 内入口。本页说明它的工作方式与隐私边界。
 
 ## 市场（SKILL / MCP / Workflow）
 

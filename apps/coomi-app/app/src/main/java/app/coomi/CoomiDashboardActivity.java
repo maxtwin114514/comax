@@ -619,7 +619,11 @@ public class CoomiDashboardActivity extends Activity {
             if (isFinishing() || isDestroyed() || info == null || !info.hasUpdate(this)) return;
             mUpdateDot.setVisibility(View.VISIBLE);
             mCheckUpdateDesc.setText("发现新版本 " + info.version + "，点击更新");
-            showStartupUpdateDialog(info);
+            // 「关闭更新提醒」只压住这个启动弹窗：红点与描述仍然更新，
+            // 用户主动进「检查更新」页依旧能看到并安装。
+            if (UpdateChecker.isUpdateNotifyEnabled(this)) {
+                showStartupUpdateDialog(info);
+            }
         }));
     }
 
