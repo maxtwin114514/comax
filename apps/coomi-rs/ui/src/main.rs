@@ -42,6 +42,7 @@ mod terminal_ui;
 mod cloud;
 mod cloud_tunnel;
 mod dynwork;
+mod plugins;
 mod web;
 mod workflow;
 

@@ -5,7 +5,7 @@
  */
 import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, DEFAULT_CONNECTION_SETTINGS, PERMISSION_MODES, REASONING_EFFORTS, type ConnectionSettings } from '@/stores/config'
+import { useConfigStore, DEFAULT_CONNECTION_SETTINGS, PERMISSION_MODES, REASONING_EFFORTS, REASONING_EFFORT_LABELS, type ConnectionSettings } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
@@ -146,12 +146,21 @@ async function fetchModelCapabilities() {
 }
 
 /** 当前模型实际可用的强度档位（引擎返回的 efforts + 关闭/自动）。 */
-const availableEfforts = computed(() => {
+const availableEfforts = computed<{ value: ReasoningEffort; label: string }[]>(() => {
+  // 1.5.4：档位不再写死。引擎/模型说支持哪些就排哪些（max、minimal 也能出现），
+  // 检测不到时才退回「关闭 / 自动 / 低 / 中」这四档 —— 默认不再摆出高与超高。
+  const order: ReasoningEffort[] = ['off', 'auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
   const caps = reasoningCaps.value
-  if (!caps) return REASONING_EFFORTS
+  if (!caps) {
+    return REASONING_EFFORTS
+      .filter(item => ['off', 'auto', 'low', 'medium'].includes(item.value))
+      .map(item => ({ value: item.value, label: item.label }))
+  }
   const allowed = new Set<string>(['off', 'auto', ...(caps.efforts ?? [])])
   if (caps.can_disable === false) allowed.delete('off')
-  return REASONING_EFFORTS.filter(item => allowed.has(item.value))
+  return order
+    .filter(value => allowed.has(value))
+    .map(value => ({ value, label: REASONING_EFFORT_LABELS[value] ?? value }))
 })
 
 /** 拖拽滑块值：0=off 1=auto 2=low 3=medium 4=high 5=xhigh（按可用档位动态映射）。 */
@@ -325,6 +334,15 @@ onMounted(async () => {
             <span class="rmain">定制身份定位</span>
             <span class="rsub">{{ config.customPrompt.trim() ? '已配置，置于系统提示词最前生效' : '未设置。让 AI 认知自己的身份与定位' }}</span>
           </span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
+      </div>
+
+      <p class="sec-label">扩展</p>
+      <div class="group">
+        <button class="row" @click="router.push('/plugins')">
+          <span class="ri"><CoomiIcon name="sparkle" :size="17" /></span>
+          <span class="rt"><span class="rmain">插件</span><span class="rsub">界面扩展、动效、桌宠、提示词注入（含接口文档）</span></span>
           <CoomiIcon name="chevronRight" :size="15" class="arw" />
         </button>
       </div>

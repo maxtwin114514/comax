@@ -33,6 +33,7 @@ import ApprovalSheet from '@/components/ApprovalSheet.vue'
 import QuestionSheet from '@/components/QuestionSheet.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 import SendMorphOverlay from '@/components/SendMorphOverlay.vue'
+import PluginSlot from '@/components/PluginSlot.vue'
 import { registerOverlay, unregisterOverlay } from '@/bridge/overlayStack'
 
 const router = useRouter()
@@ -245,6 +246,8 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   <div class="chat" :class="{ 'minimal-ui': config.minimalUi, pushed: drawerOpen }">
     <div class="shell" :class="{ pushed: drawerOpen }">
       <TopBar :menu-open="drawerOpen" @menu="toggleDrawer" />
+      <!-- 插件浮层：绝对定位盖在会话区上方，pointer-events 由插件自己决定 -->
+      <div class="plugin-overlay-layer"><PluginSlot name="chat-overlay" /></div>
 
       <DynamicScroller
         v-if="blocks.length > 0"
@@ -345,6 +348,12 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
 </template>
 
 <style scoped>
+/* 插件浮层容器：不拦事件，只负责定位。插件若要做可点击的浮层，自己开 pointer-events。 */
+.plugin-overlay-layer {
+  /* .chat 本身是 overflow:hidden 的高度容器；这里覆盖整块会话区，
+     z-index 低于弹层（40/60）、高于消息流，插件想拦事件就自己开 pointer-events。 */
+  position: absolute; inset: 0; z-index: 6; pointer-events: none;
+}
 .chat {
   height: 100%;
   min-height: 0;

@@ -148,6 +148,13 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.Coomi" />
 
+        <!-- 报错日志：原生页面，引擎起不来时也能打开 -->
+        <activity
+            android:name="app.coomi.CoomiLogActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Coomi" />
+
         <activity
             android:name="app.coomi.CoomiHomeSettingActivity"
             android:exported="false"

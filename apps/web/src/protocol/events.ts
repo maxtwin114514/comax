@@ -11,6 +11,11 @@ export interface UsageInfo {
   turn_output_tokens?: number
   turn_elapsed_ms?: number
   turn_rate_tps?: number
+  /** 本轮输入 token 与总 token（多轮工具调用累加）。 */
+  turn_input_tokens?: number
+  turn_total_tokens?: number
+  /** 本轮首字耗时（毫秒）。null/缺省 = 还没出首字。 */
+  turn_first_token_ms?: number | null
   context_ratio?: number
   context_used_tokens?: number
   context_window_tokens?: number
@@ -63,7 +68,12 @@ export interface SessionLoadedEvent {
   event_type: 'session_loaded'
   session_id: string
   cwd: string
-  usage: { input_tokens: number; output_tokens: number; total_tokens: number }
+  usage: {
+    input_tokens: number; output_tokens: number; total_tokens: number
+    /** 上下文窗口与已用量：刚进会话（还没对话）时上下文面板就用这两个值。 */
+    context_window_tokens?: number
+    context_used_tokens?: number
+  }
 }
 /** 数字生命体主动消息投递完成（气泡/开场问候）。 */
 export interface LifeDeliveredEvent {

@@ -2,7 +2,14 @@ import type { AgentEvent } from './events'
 
 export type PermissionMode = 'ask' | 'auto' | 'full' | 'minimal'
 export type ApprovalDecision = 'allow' | 'deny' | 'always'
-export type ReasoningEffort = 'off' | 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
+/**
+ * 思考强度。
+ *
+ * 1.5.4 起不再把「高/超高」写死成全局档位：各家的取值不统一（OpenAI 是
+ * minimal/low/medium/high，有的网关还有 max），所以由模型自己声明可用清单，
+ * 前端只展示那一份。`off` = 纯聊天（不思考、不给工具）。
+ */
+export type ReasoningEffort = 'off' | 'auto' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type SessionMode = 'agent' | 'life'
 
 export interface SendMessageCommand { command: 'send_message'; text: string }

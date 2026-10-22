@@ -48,6 +48,59 @@ impl HttpModelProvider {
         Ok(Self { config, client, key_cursor: std::sync::atomic::AtomicUsize::new(0) })
     }
 
+    /// 探测这个模型真正接受的思考强度（`max` / `high` / …）。
+    ///
+    /// 用户 1.5.4 第 13 项要求「保存模型前先获取可用思考强度」。各家的取值并不统一
+    /// （OpenAI 是 minimal/low/medium/high，DeepSeek 直接不认这个字段，Gemini 又是
+    /// thinkingLevel），文档也经常滞后，所以这里**实测**：对每个候选值发一次
+    /// `max_tokens=16` 的极短请求，只按 HTTP 结果判定。
+    ///
+    /// 判定规则（保守，不猜）：
+    ///   · 2xx                                → 这个值被接受；
+    ///   · 400/422 且错误里提到 reasoning/thinking/effort → 不支持该值，继续试下一个；
+    ///   · 其它状态（401/403/404/429/5xx）    → 鉴权或网络问题，直接返回 None，绝不瞎写。
+    ///
+    /// 目前只对 OpenAI 兼容协议实测：Anthropic 的 thinking 预算、Gemini 的
+    /// thinkingLevel 与 OpenAI 的字段语义不同，用同一个探测器会得出错误结论，
+    /// 那两种协议返回 None，由上层退回到「按协议已知的档位」。
+    pub async fn probe_reasoning_efforts(&self) -> Option<Vec<String>> {
+        if self.config.kind != ProviderKind::OpenAiCompatible {
+            return None;
+        }
+        let endpoint = endpoint(&self.config.base_url, "chat/completions");
+        let mut supported = Vec::new();
+        for candidate in ["max", "xhigh", "high", "medium", "low", "minimal"] {
+            let mut body = json!({
+                "model": self.config.model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": false,
+                "max_tokens": 16,
+            });
+            apply_model_parameters(&self.config, &mut body, Some(candidate), Some(false));
+            let request = self
+                .with_provider_headers(self.authenticated(self.client.post(&endpoint)), None)
+                .timeout(Duration::from_secs(12))
+                .json(&body);
+            let Ok(response) = request.send().await else {
+                return None;
+            };
+            let status = response.status();
+            if status.is_success() {
+                supported.push(candidate.to_owned());
+                continue;
+            }
+            let detail = response.text().await.unwrap_or_default().to_lowercase();
+            let reasoning_related = detail.contains("reasoning")
+                || detail.contains("thinking")
+                || detail.contains("effort");
+            if matches!(status.as_u16(), 400 | 422) && reasoning_related {
+                continue;
+            }
+            return None;
+        }
+        (!supported.is_empty()).then_some(supported)
+    }
+
     #[cfg(test)]
     fn build_authenticated_request(
         &self,
@@ -941,14 +994,18 @@ impl HttpModelProvider {
 
 /// Some OpenAI-compatible gateways understand reasoning but only accept `high`.
 /// Preserve the strongest supported level before falling back to removing reasoning entirely.
+///
+/// 1.5.4 起 `max` 也算强档（部分网关的上限写法）。只有在拿到 400 之后才会走到这里，
+/// 所以把 `max` 一并降成 `high` 是安全的：能接受 `max` 的服务根本不会返回 400。
 fn downgrade_xhigh_reasoning(body: &mut Value) {
-    if body.get("reasoning_effort").and_then(Value::as_str) == Some("xhigh") {
+    let strong = |value: Option<&Value>| matches!(value.and_then(Value::as_str), Some("xhigh" | "max"));
+    if strong(body.get("reasoning_effort")) {
         body["reasoning_effort"] = Value::String("high".into());
     }
-    if body.pointer("/reasoning/effort").and_then(Value::as_str) == Some("xhigh") {
+    if strong(body.pointer("/reasoning/effort")) {
         set_json_path(body, "reasoning.effort", Value::String("high".into()));
     }
-    if body.pointer("/thinking/effort").and_then(Value::as_str) == Some("xhigh") {
+    if strong(body.pointer("/thinking/effort")) {
         set_json_path(body, "thinking.effort", Value::String("high".into()));
     }
 }

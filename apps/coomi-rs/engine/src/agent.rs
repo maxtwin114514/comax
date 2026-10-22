@@ -77,6 +77,9 @@ pub struct Agent {
     vision_replay: bool,
     vision_fallback: Option<Arc<dyn Fn() + Send + Sync>>,
     reasoning_effort: Option<String>,
+    /// 纯聊天模式（推理强度「关闭」）：不发送任何工具定义，也不执行工具。
+    /// 用户要求「不思考 = 纯聊天，只给人格提示词，不能调用工具」。
+    chat_only: bool,
     /// 上下文检查点回调：任务执行中的关键节点（用户消息、模型回复、每轮
     /// 工具结果）落盘会话，意外中断/重启后仍能从磁盘恢复完整上下文。
     checkpoint: Option<Arc<dyn Fn(&Session) + Send + Sync>>,
@@ -97,9 +100,16 @@ impl Agent {
             vision_replay: true,
             vision_fallback: None,
             reasoning_effort: None,
+            chat_only: false,
             checkpoint: None,
             turn_control: None,
         }
+    }
+
+    /// 开启纯聊天模式：不发送工具定义、不执行工具，提示词只保留人格。
+    pub fn with_chat_only(mut self, chat_only: bool) -> Self {
+        self.chat_only = chat_only;
+        self
     }
 
     /// 注册上下文检查点：每次关键消息落盘时调用（由调用方负责持久化 session）。
@@ -368,7 +378,9 @@ impl Agent {
         }
         session.messages.push(prompt);
         self.run_checkpoint(session);
-        let tool_specs = tools.specs();
+        // 纯聊天模式：一个工具都不声明。模型看不到工具就不会去调；
+        // 万一仍然返回了 tool_calls，下面的分支会直接丢弃，绝不执行。
+        let tool_specs = if self.chat_only { Vec::new() } else { tools.specs() };
         let capabilities = provider.capabilities();
         let mut compacted_for_provider_error = false;
         let mut vision_replay = self.vision_replay;
@@ -430,10 +442,11 @@ impl Agent {
                 model: provider.model().to_string(),
                 messages,
                 tools: tool_specs.clone(),
-                reasoning_effort: self.reasoning_effort.clone(),
+                // 「关闭」不是上游认识的档位：不发该字段，thinking_enabled=false。
+                reasoning_effort: if self.chat_only { None } else { self.reasoning_effort.clone() },
                 session_id: Some(session.id.to_string()),
                 search_enabled: false,
-                thinking_enabled: self.reasoning_effort.as_deref() != Some("off"),
+                thinking_enabled: !self.chat_only && self.reasoning_effort.as_deref() != Some("off"),
             };
             let reasoning_sink = Arc::new(std::sync::Mutex::new(String::new()));
             let stream_observer = ObserverStream {
@@ -587,6 +600,12 @@ impl Agent {
                 if self.accept_queued_input(session, observer) {
                     continue;
                 }
+                session.touch();
+                return Ok(response_content);
+            }
+
+            // 纯聊天模式：即使上游硬塞回 tool_calls，也只回文本，不执行任何工具。
+            if self.chat_only {
                 session.touch();
                 return Ok(response_content);
             }

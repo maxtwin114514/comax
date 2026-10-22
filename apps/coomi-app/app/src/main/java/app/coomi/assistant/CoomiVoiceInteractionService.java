@@ -53,17 +53,42 @@ public final class CoomiVoiceInteractionService extends VoiceInteractionService 
 
     @Override public void onReady() {
         super.onReady();
-        // The system can invoke the assistant after Comax's UI process was reclaimed.
-        // Recreate the local engine host without opening an Activity.
-        startService(new Intent(this, CoomiService.class));
-        startService(new Intent(this, CoomiEngineMonitor.class));
+        // 这里**故意什么都不做**（1.5.4 第 2 项）。
+        //
+        // 之前的写法在 onReady 里就把 CoomiService + 引擎监控拉起来并启动引擎。
+        // 问题在于 onReady 是「系统绑定助手服务」时调用的 —— 用户把 Comax 设成
+        // 默认助手之后，**开机就会调用**，跟"有没有打开 App""有没有给自启动权限"
+        // 完全无关。于是用户看到的现象就是：没开软件，引擎在后台跑起来了。
+        //
+        // 现在改成按需拉起：只有真正要弹助手会话时（见 CoomiVoiceInteractionSession
+        // 与 {@link #wakeEngineHost()}）才创建宿主并启动引擎，界面在前台时由
+        // CoomiActivity 自己负责拉起。
+    }
+
+    /**
+     * 真正要用助手了才把引擎宿主拉起来。
+     *
+     * 由语音会话创建流程调用；界面在前台时这一步通常已经由 App 完成，
+     * 重复调用是安全的（startEngine 内部幂等）。
+     */
+    static void wakeEngineHost() {
+        CoomiVoiceInteractionService service = sCurrent;
+        if (service == null) return;
+        try {
+            service.startService(new Intent(service, CoomiService.class));
+            service.startService(new Intent(service, CoomiEngineMonitor.class));
+        } catch (Exception error) {
+            Logger.logError(LOG_TAG, "engine host start failed: " + error.getMessage());
+            return;
+        }
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            CoomiService service = CoomiService.current();
-            if (service != null) service.startEngine(result -> { /* status is shown by the session */ });
+            CoomiService service2 = CoomiService.current();
+            if (service2 != null) service2.startEngine(result -> { /* 会话里会展示状态 */ });
         }, 180L);
     }
 
     @Override public void onLaunchVoiceAssistFromKeyguard() {
+        wakeEngineHost();
         showSession(new Bundle(), VoiceInteractionSession.SHOW_WITH_ASSIST
             | VoiceInteractionSession.SHOW_WITH_SCREENSHOT);
     }

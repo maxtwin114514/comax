@@ -68,25 +68,49 @@ const scriptOpen = ref(false)
 const running = computed(() => status.value?.tunnel.running === true)
 const accessUrl = computed(() => status.value?.access_url ?? '')
 
-function apply(next: CloudStatus) {
+/**
+ * 表单是否被用户改过（但还没保存）。
+ *
+ * 这是「输入任何文字，过一会儿就自己消失」的根因：页面每 5 秒轮询一次
+ * `/api/cloud-access`，每次拿到服务器上的旧值就无脑写回 host/user/domain，
+ * 用户正在打的字被覆盖成上一次保存的内容。
+ *
+ * 修法不是「输入时暂停轮询」——停手 5 秒后又会被覆盖。改成：只要表单被改过，
+ * 轮询只更新**状态**（隧道是否连上、错误信息），绝不碰输入框。保存成功后
+ * 表单与服务器一致，才重新允许回写。
+ */
+const formTouched = ref(false)
+function markTouched() { formTouched.value = true }
+
+function apply(next: CloudStatus, options: { keepForm?: boolean } = {}) {
   status.value = next
+  // 隧道开关是服务端事实，永远同步；输入框按上面的规则保护。
+  enabled.value = next.enabled
+  if (options.keepForm ?? formTouched.value) return
   host.value = next.host
   user.value = next.user
   domain.value = next.domain
   tunnelPort.value = next.tunnel_port
-  enabled.value = next.enabled
 }
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    apply(await apiGet<CloudStatus>('/api/cloud-access'))
+    apply(await apiGet<CloudStatus>('/api/cloud-access'), { keepForm: formTouched.value })
   } catch (cause) {
     error.value = `读取云端访问配置失败：${String(cause)}`
   } finally {
     loading.value = false
   }
+}
+
+/** 放弃未保存的输入，重新按服务器配置填表。 */
+async function resetForm() {
+  formTouched.value = false
+  notice.value = ''
+  await load()
+  notice.value = '已按服务器上的配置重新填入'
 }
 
 async function save() {
@@ -103,8 +127,9 @@ async function save() {
     }
     // 密码留空表示「不改动已保存的密码」，避免每次保存都要重打一遍
     if (password.value) payload.password = password.value
-    apply(await apiSend<CloudStatus>('/api/cloud-access', 'PUT', payload))
+    apply(await apiSend<CloudStatus>('/api/cloud-access', 'PUT', payload), { keepForm: false })
     password.value = ''
+    formTouched.value = false
     notice.value = '已保存。记得在服务器上跑一次部署脚本。'
   } catch (cause) {
     error.value = `保存失败：${String(cause)}`
@@ -126,10 +151,11 @@ async function toggleTunnel(action: 'start' | 'stop') {
       tunnel_port: tunnelPort.value,
       enabled: true,
       ...(password.value ? { password: password.value } : {}),
-    }))
+    }), { keepForm: false })
     password.value = ''
+    formTouched.value = false
     const next = await apiSend<CloudStatus>('/api/cloud-access/tunnel', 'POST', { action })
-    apply(next)
+    apply(next, { keepForm: false })
     notice.value = action === 'start'
       ? (next.tunnel.running ? '隧道已建立' : '已开始连接，引擎会在后台保持并自动重拨')
       : '已断开，引擎不会自动重连（再点「连接」即可恢复）'
@@ -192,27 +218,31 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
       <section class="card">
         <p class="qhead">连接信息</p>
         <label class="field"><span>公网 IP</span>
-          <input v-model="host" inputmode="url" placeholder="例如 1.2.3.4" autocomplete="off" />
+          <input v-model="host" inputmode="url" placeholder="例如 1.2.3.4" autocomplete="off" @input="markTouched" />
         </label>
         <label class="field"><span>访问用户名</span>
-          <input v-model="user" placeholder="随便起一个，用来给中继鉴权，例如 comax" autocomplete="username" />
+          <input v-model="user" placeholder="随便起一个，用来给中继鉴权，例如 comax" autocomplete="username" @input="markTouched" />
         </label>
         <label class="field"><span>密码</span>
-          <input v-model="password" type="password" autocomplete="current-password"
+          <input v-model="password" type="password" autocomplete="current-password" @input="markTouched"
                  :placeholder="status?.has_password ? '已保存（留空则不修改）' : '和中继账号配套的密码'" />
           <span class="input-hint">留空表示不修改已保存的密码</span>
         </label>
         <label class="field"><span>服务器访问域名（选填）</span>
-          <input v-model="domain" inputmode="url" placeholder="留空则用公网 IP 直连" autocomplete="off" />
+          <input v-model="domain" inputmode="url" placeholder="留空则用公网 IP 直连" autocomplete="off" @input="markTouched" />
           <span class="input-hint">填了域名后，访问地址会显示这个域名；浏览器侧会自动切到宽屏排版</span>
         </label>
         <label class="field"><span>访问端口</span>
           <input
             :value="tunnelPort"
             inputmode="numeric"
-            @input="event => tunnelPort = Number((event.target as HTMLInputElement).value.replace(/[^0-9]/g, '')) || 0"
+            @input="event => { tunnelPort = Number((event.target as HTMLInputElement).value.replace(/[^0-9]/g, '')) || 0; markTouched() }"
           />
         </label>
+        <p v-if="formTouched" class="input-hint">
+          当前有未保存的修改：自动刷新不会覆盖你正在输入的内容。
+          <button class="link-btn" @click="resetForm">放弃修改并重新读取</button>
+        </p>
         <div class="row-actions">
           <button class="btn ghost" :disabled="saving" @click="save">
             <CoomiIcon name="check" :size="15" />{{ saving ? '保存中…' : '保存' }}
@@ -343,5 +373,6 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 .line strong.off { color: var(--text-3); }
 .err-line strong { color: var(--danger); font-weight: 500; font-size: 11.8px; }
 .input-hint { font-size: 11px; color: var(--text-3); margin-top: -2px; }
+.link-btn { padding: 0; border: 0; background: none; color: var(--blue); font-size: 11px; text-decoration: underline; }
 .card-script { background: linear-gradient(180deg, var(--bg) 0%, var(--fill) 100%); }
 </style>

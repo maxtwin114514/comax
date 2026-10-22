@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    报错日志页面（1.5.4 第 12 项）。
+    这个页面**完全不依赖引擎**：引擎起不来时，它反而是唯一能用的排障入口，
+    所以要读的文件全部是磁盘上的普通文件（引擎日志、崩溃日志、logcat 快照）。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/coomiPage"
+    android:fitsSystemWindows="true"
+    tools:context="app.coomi.CoomiLogActivity">
+
+    <!-- 顶栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="@dimen/coomi_gutter"
+        android:paddingEnd="@dimen/coomi_gutter">
+
+        <ImageButton
+            android:id="@+id/btn_log_back"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/coomi_ic_back"
+            android:tint="?attr/coomiText"
+            android:contentDescription="@string/coomi_log_back"/>
+
+        <TextView
+            style="@style/Coomi.Text.Heading"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="@dimen/coomi_space_s"
+            android:text="@string/coomi_log_title"/>
+
+        <ImageButton
+            android:id="@+id/btn_log_refresh"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/coomi_ic_refresh"
+            android:tint="?attr/coomiText"
+            android:contentDescription="@string/coomi_log_refresh"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="@dimen/coomi_gutter"
+            android:paddingEnd="@dimen/coomi_gutter"
+            android:paddingTop="@dimen/coomi_space_xs"
+            android:paddingBottom="@dimen/coomi_space_xl">
+
+            <!-- 说明 -->
+            <LinearLayout style="@style/Coomi.Card">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="@dimen/coomi_space_m"
+                    android:text="@string/coomi_log_intro"
+                    android:textColor="?attr/coomiText2"
+                    android:textSize="@dimen/coomi_text_caption"
+                    android:lineSpacingExtra="3dp"/>
+            </LinearLayout>
+
+            <!-- 引擎日志路径 -->
+            <TextView
+                style="@style/Coomi.Text.SectionLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_l"
+                android:text="@string/coomi_log_path_title"/>
+
+            <LinearLayout
+                style="@style/Coomi.Card"
+                android:padding="@dimen/coomi_space_m"
+                android:orientation="vertical">
+
+                <EditText
+                    android:id="@+id/input_log_path"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
+                    android:background="@null"
+                    android:hint="@string/coomi_log_path_hint"
+                    android:inputType="textNoSuggestions"
+                    android:singleLine="true"
+                    android:textColor="?attr/coomiText"
+                    android:textColorHint="?attr/coomiText3"
+                    android:textSize="@dimen/coomi_text_body"/>
+
+                <TextView
+                    android:id="@+id/txt_log_path_note"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="?attr/coomiText3"
+                    android:textSize="@dimen/coomi_text_caption"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/coomi_space_s"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_log_save_path"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="0dp"
+                        android:layout_height="42dp"
+                        android:layout_weight="1"
+                        android:text="@string/coomi_log_save_path"/>
+
+                    <Button
+                        android:id="@+id/btn_log_reset_path"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="0dp"
+                        android:layout_height="42dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="@dimen/coomi_space_s"
+                        android:text="@string/coomi_log_reset_path"/>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 日志来源 -->
+            <TextView
+                style="@style/Coomi.Text.SectionLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_l"
+                android:text="@string/coomi_log_sources"/>
+
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_log_source_engine"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:minWidth="96dp"
+                        android:text="@string/coomi_log_source_engine"/>
+
+                    <Button
+                        android:id="@+id/btn_log_source_crash"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:layout_marginStart="@dimen/coomi_space_s"
+                        android:minWidth="96dp"
+                        android:text="@string/coomi_log_source_crash"/>
+
+                    <Button
+                        android:id="@+id/btn_log_source_logcat"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:layout_marginStart="@dimen/coomi_space_s"
+                        android:minWidth="96dp"
+                        android:text="@string/coomi_log_source_logcat"/>
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView
+                android:id="@+id/txt_log_file"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_s"
+                android:textColor="?attr/coomiText3"
+                android:textSize="@dimen/coomi_text_caption"
+                android:fontFamily="monospace"
+                android:textIsSelectable="true"/>
+
+            <!-- 内容 -->
+            <TextView
+                android:id="@+id/txt_log_content"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_s"
+                android:background="?attr/coomiCard"
+                android:padding="@dimen/coomi_space_m"
+                android:fontFamily="monospace"
+                android:textColor="?attr/coomiText"
+                android:textIsSelectable="true"
+                android:textSize="@dimen/coomi_text_caption"
+                android:lineSpacingExtra="2dp"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_m"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_log_copy"
+                    style="@style/Coomi.Button.Outline"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:text="@string/coomi_log_copy"/>
+
+                <Button
+                    android:id="@+id/btn_log_share"
+                    style="@style/Coomi.Button.Outline"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="@dimen/coomi_space_s"
+                    android:text="@string/coomi_log_share"/>
+                </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

@@ -176,12 +176,29 @@ public class CoomiActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 1.5.4 第 2 项：告诉引擎监控「界面在前台了」。
+        // 只有这个标记为 true 时，监控服务才允许把引擎拉起来；用户没开自启动、
+        // 也没打开 App 的情况下，引擎不会在后台自己启动。
+        CoomiEngineMonitor.setAppVisible(true);
+        if (!CoomiDemo.isEnabled()) {
+            // 监控服务可能因为「后台且未开自启动」自行退出过，回到前台要重新拉起它。
+            startService(new Intent(this, CoomiEngineMonitor.class));
+        }
         String currentMode = CoomiTheme.getMode(this);
         if (mAppliedThemeMode == null || !mAppliedThemeMode.equals(currentMode)) {
             mAppliedThemeMode = currentMode;
         }
         applyThemeToWebView();
         CoomiTheme.applySystemBars(this);
+    }
+
+    @Override
+    protected void onPause() {
+        // 原有的落盘动作 + 1.5.4 的「界面离开前台」标记合并在这里。
+        // （Java 不允许两个同名重写，之前加漏了一处，编译期就暴露了。）
+        evaluateJavascript("window.dispatchEvent(new Event('coomi:flush-persistence'))");
+        CoomiEngineMonitor.setAppVisible(false);
+        super.onPause();
     }
 
     /**
@@ -1242,12 +1259,6 @@ public class CoomiActivity extends Activity {
 
     private void evaluateJavascript(String script) {
         if (mWebView != null) mWebView.evaluateJavascript(script, null);
-    }
-
-    @Override
-    protected void onPause() {
-        evaluateJavascript("window.dispatchEvent(new Event('coomi:flush-persistence'))");
-        super.onPause();
     }
 
     @Override

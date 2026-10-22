@@ -622,6 +622,83 @@ fn coomi_envelope(kind: &str, id: Option<&str>, payload: Value) -> Value {
     envelope
 }
 
+/// 把一批待发送的 WebSocket 帧里的相邻增量合并成一条。
+///
+/// 只合并 `text_chunk` / `reasoning_chunk` 且必须是**相邻**的同类事件：
+/// 任何其它事件（工具、状态、结束）都原样保留并打断合并，所以到达顺序、
+/// 断点位置与合并前完全一致，前端的「恢复现场」逻辑不受影响。
+fn coalesce_event_messages(messages: Vec<Message>) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    // 与 out 一一对应：只有被解析成 event 增量的帧才有 Some(Value)。
+    let mut parsed: Vec<Option<Value>> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let Message::Text(text) = &message else {
+            out.push(message);
+            parsed.push(None);
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<Value>(text.as_str()) else {
+            out.push(message);
+            parsed.push(None);
+            continue;
+        };
+        let kind = value
+            .pointer("/payload/event_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let coalescable = value.get("type").and_then(Value::as_str) == Some("event")
+            && matches!(kind.as_str(), "text_chunk" | "reasoning_chunk");
+        if !coalescable {
+            out.push(message);
+            parsed.push(None);
+            continue;
+        }
+        let merged = match parsed.last_mut() {
+            Some(Some(previous)) => {
+                let previous_kind = previous
+                    .pointer("/payload/event_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if previous_kind == kind {
+                    let content = format!(
+                        "{}{}",
+                        previous
+                            .pointer("/payload/content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        value
+                            .pointer("/payload/content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    previous["payload"]["content"] = json!(content);
+                    if let Some(seq) = value.pointer("/payload/event_seq").cloned() {
+                        previous["payload"]["event_seq"] = seq;
+                    }
+                    if let Some(ts) = value.get("ts").cloned() {
+                        previous["ts"] = ts;
+                    }
+                    let serialized = previous.to_string();
+                    if let Some(last) = out.last_mut() {
+                        *last = Message::Text(serialized.into());
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if merged {
+            continue;
+        }
+        out.push(Message::Text(value.to_string().into()));
+        parsed.push(Some(value));
+    }
+    out
+}
+
 fn download_label(call: &coomi_engine::ToolCall) -> Option<String> {
     if call.name != "local_shell" && call.name != "shell" {
         return None;
@@ -934,6 +1011,15 @@ pub async fn serve(
             "/api/providers/{id}/discover-models",
             post(discover_provider_models),
         )
+        .route(
+            "/api/providers/{id}/probe-reasoning",
+            post(probe_provider_reasoning),
+        )
+        // ── 插件（1.5.4 第 11 项）────────────────────────────────────────
+        .route("/api/plugins", get(list_plugins))
+        .route("/api/plugins/{id}/toggle", post(toggle_plugin))
+        .route("/api/plugins/{id}/prompt", post(set_plugin_prompt))
+        .route("/api/plugins/{id}/asset/{*path}", get(plugin_asset))
         .route("/api/sessions", get(list_sessions))
         .route("/api/tasks", get(list_tasks))
         .route("/api/tasks/{session_id}", delete(cancel_task_api))
@@ -5625,6 +5711,129 @@ async fn discover_provider_models(
     Ok(Json(json!({"models": models, "contextWindows": context_windows})))
 }
 
+// ── 插件 API ────────────────────────────────────────────────────────────
+
+async fn list_plugins(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // 目录第一次访问时建好，用户不必自己 mkdir —— 界面里会直接显示这个路径。
+    let dir = crate::plugins::plugins_dir(&state.home);
+    let _ = fs::create_dir_all(&dir);
+    Ok(Json(crate::plugins::overview(&state.home)))
+}
+
+async fn toggle_plugin(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::bad_request("missing `enabled`"))?;
+    crate::plugins::set_enabled(&state.home, &id, enabled).map_err(ApiError::from)?;
+    Ok(Json(crate::plugins::overview(&state.home)))
+}
+
+async fn set_plugin_prompt(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let prompt = body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    crate::plugins::set_prompt(&state.home, &id, prompt).map_err(ApiError::from)?;
+    Ok(Json(crate::plugins::overview(&state.home)))
+}
+
+async fn plugin_asset(
+    State(state): State<AppState>,
+    AxumPath((id, path)): AxumPath<(String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let Some((bytes, mime)) = crate::plugins::read_asset(&state.home, &id, &path) else {
+        return Err(ApiError::not_found("plugin asset not found"));
+    };
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, mime)],
+        bytes,
+    )
+        .into_response())
+}
+
+/// 探测某个模型实际可用的思考强度。
+///
+/// 请求体：`{ "model": "…" }`（省略则用该厂商当前模型）。
+/// 返回：`{ "efforts": [...], "source": "probe" | "inferred" | "unknown", "hint": "…" }`
+///
+/// 为什么 source 要如实返回：探测不出来的时候前端必须能显示"没测到"，
+/// 而不是把一份猜出来的清单当作事实写进配置。
+async fn probe_provider_reasoning(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, ApiError> {
+    let registry = ProviderRegistry::load(&providers_path(&state.home)).map_err(ApiError::from)?;
+    let mut provider = registry
+        .resolve(Some(&id))
+        .map_err(ApiError::from)?;
+    if let Some(model) = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        provider.model = model.to_owned();
+        if let Some(window) = provider.model_context_windows.get(model) {
+            provider.capabilities.context_window = *window;
+        }
+    }
+    if provider.model.trim().is_empty() {
+        return Err(ApiError::bad_request("provider has no model selected"));
+    }
+    let kind = provider.kind;
+    let runtime = HttpModelProvider::new(provider.clone()).map_err(ApiError::from)?;
+    let probed = runtime.probe_reasoning_efforts().await;
+
+    // 探测不到时按协议/模型给一份**明确标注为推断**的清单：
+    // 「关闭 / 自动」永远存在，其余档位只在确实常见的模型上给出。
+    let inferred: Vec<&str> = if matches!(kind, ProviderKind::AnthropicMessages) {
+        vec!["high", "medium", "low"]
+    } else if matches!(kind, ProviderKind::GeminiNative) {
+        vec!["high", "medium", "low"]
+    } else if provider.model.to_ascii_lowercase().contains("deepseek") {
+        vec!["high", "medium"]
+    } else if matches!(kind, ProviderKind::OpenAiResponses) {
+        vec!["high", "medium", "low"]
+    } else {
+        vec!["high", "medium", "low"]
+    };
+    let (efforts, source, hint) = match probed {
+        Some(list) if !list.is_empty() => (
+            list,
+            "probe",
+            "已对该模型逐个实测，只保留返回 2xx 的档位",
+        ),
+        _ if matches!(kind, ProviderKind::DeepseekAccount) => (
+            vec!["high".to_owned(), "medium".to_owned()],
+            "inferred",
+            "账号协议不暴露强度字段，这里按 DeepSeek 网页版深度思考开关推断",
+        ),
+        _ => (
+            inferred.iter().map(|value| (*value).to_owned()).collect(),
+            "inferred",
+            "实测没有拿到确定结果（鉴权/网络/协议不支持），这是按协议推断的清单，可手动修改",
+        ),
+    };
+    Ok(Json(json!({
+        "model": provider.model,
+        "provider_id": id,
+        "efforts": efforts,
+        "source": source,
+        "hint": hint,
+    })))
+}
+
 async fn runtime_v2_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let manager = RuntimeManager::open(&state.home).map_err(ApiError::from)?;
     let runtime = manager.state().map_err(ApiError::from)?;
@@ -6685,8 +6894,25 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
     ));
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if sink.send(message).await.is_err() {
-                break;
+            // 1.5.4 第 9 项：把同一批排队的消息先攒起来再写出去。
+            //
+            // 模型流式输出时每个 token 一个 text_chunk，每个 chunk 都是一整帧
+            // WebSocket 文本 + 一次 JSON.parse + 一次 Vue 响应式更新。在手机上，
+            // 这两件事加起来就是"看着还在吐字，其实已经落后半秒"。
+            // 这里只等 12ms（人眼分辨不出），把相邻的同类增量合并成一条，
+            // 帧数往往降到原来的 1/5～1/10，而字幕的到达顺序完全不变。
+            let mut batch = vec![message];
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(12);
+            while batch.len() < 256 {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(next)) => batch.push(next),
+                    _ => break,
+                }
+            }
+            for out in coalesce_event_messages(batch) {
+                if sink.send(out).await.is_err() {
+                    return;
+                }
             }
         }
     });
@@ -6697,8 +6923,18 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
 
     // Push the persisted session state (usage totals) as soon as the socket opens,
     // so reopening a session never shows a stale zero counter.
+    let mut usage_seeded = false;
     if let Ok(parsed_id) = Uuid::parse_str(&session_id) {
         if let Ok(session) = SessionStore::new(&state.home).load(parsed_id) {
+            // 用户 1.5.4 第 6 项：刚进软件 / 还没对话时，右上角上下文面板也要有内容。
+            // 上下文窗口与已用 token 都能从会话记录 + 当前厂商能力直接算出来，
+            // 不必等一次对话跑完才有数据。
+            let (context_window, context_used) = ProviderRegistry::load(&providers_path(&state.home))
+                .ok()
+                .and_then(|registry| registry.resolve(None).ok())
+                .map(|provider| session.context.status(&provider.capabilities))
+                .map(|status| (status.context_window, status.used_tokens))
+                .unwrap_or((0, 0));
             context.send_event(json!({
                 "event_type": "session_loaded",
                 "session_id": session_id,
@@ -6707,6 +6943,40 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
                     "input_tokens": session.usage.input_tokens,
                     "output_tokens": session.usage.output_tokens,
                     "total_tokens": session.usage.total_tokens(),
+                    "context_window_tokens": context_window,
+                    "context_used_tokens": context_used,
+                },
+            }));
+            usage_seeded = true;
+        }
+    }
+
+    // 会话文件还不存在（新建会话第一次进来）时也要有内容：上下文窗口来自当前厂商能力，
+    // 已用 0 是真实值（这个会话确实还没说话）。只在上方没发过 session_loaded 时补发，
+    // 避免把已有累计值覆盖成 0。
+    if !usage_seeded
+        && let Ok(registry) = ProviderRegistry::load(&providers_path(&state.home))
+        && let Ok(provider) = registry.resolve(None)
+    {
+        let window = provider.capabilities.effective_context_window();
+        if window > 0 {
+            context.send_event(json!({
+                "event_type": "usage_update",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "context_window_tokens": window,
+                    "context_used_tokens": 0,
+                    "context_ratio": 0.0,
+                    "cache_data_available": false,
+                    "turn_cache_data_available": false,
+                    "turn_input_tokens": 0,
+                    "turn_output_tokens": 0,
+                    "turn_total_tokens": 0,
+                    "turn_elapsed_ms": 0,
+                    "turn_rate_tps": 0,
+                    "turn_first_token_ms": Value::Null,
                 },
             }));
         }
@@ -7186,7 +7456,10 @@ async fn handle_command(
                 .get("effort")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if !matches!(effort, "off" | "auto" | "low" | "medium" | "high" | "xhigh") {
+            // 1.5.4：档位不再写死。各家的取值不统一（OpenAI 有 minimal，部分网关有 max），
+            // 前端按模型声明来选，这里只挡明显非法/超长的输入，避免把任意字符串写进配置。
+            let valid = matches!(effort, "off" | "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max");
+            if !valid {
                 context.send_error(envelope_id, "invalid reasoning effort");
                 return;
             }
@@ -7875,6 +8148,10 @@ async fn run_turn(
     } else {
         None
     };
+    // 纯聊天的判定必须早于提示词构建：它决定「只给人格」还是「拼整套 agent 规则」。
+    // 超载模式会强制 xhigh，此时不算纯聊天（用户要的是干活）。
+    let chat_only = context.reasoning_effort.read().await.as_str() == "off"
+        && !context.production_mode.load(Ordering::Relaxed);
     let mut prompt_context = system_prompt_with_cognitive(
         &state.home,
         &cwd,
@@ -7886,17 +8163,22 @@ async fn run_turn(
         permission == PermissionMode::Minimal,
     )
     .await;
-    if cognitive_enabled {
+    // 推理强度「关闭」= 纯聊天（用户 1.5.4 第 14 项）：只给人格提示词，
+    // 不追加 agent 规则、不路由技能、不注入记忆/MCP 清单，也不发送任何工具。
+    if chat_only {
+        prompt_context = chat_only_prompt(&state.home);
+    }
+    if cognitive_enabled && !chat_only {
         prompt_context.push_str(&cognitive_prompt_context(life_context.as_ref().expect("life context"))?);
     }
-    if context.production_mode.load(Ordering::Relaxed) && !recovery {
+    if context.production_mode.load(Ordering::Relaxed) && !recovery && !chat_only {
         prompt_context.push_str("\n\n## 超载模式（注意力全开）\n");
         prompt_context.push_str(include_str!("strict_prompt.md"));
         prompt_context.push_str("\n\n【题意仲裁器】遇到数学题、逻辑题、概率题、脑筋题或包含“至少/至多/保证/随机/可以选择/不能选择”等词的题目，先逐字提取量词、行动权限、随机机制和保证目标。用户明确给出的前提、边界说明和指定答案拥有最高优先级；不得擅自改题，不得把其他规则下的结果写成当前题目的答案。只有用户明确询问其他解释时，才在主答案之后简短补充。\n【糖果题校准】若题目允许凭手感主动选择形状，主答案按主动选择规则计算，绝不能回答 29。29 只属于“不允许选择形状、完全随机抓取且要求必然保证”的另一道题；除非用户明确问该规则，否则不要主动给出 29，以免误导。\n【独立复算】数字结论必须换一种方法复算，并检查最小性与反例。两次推导不一致时不得装作确定。\n【最终一致性】结尾数字必须与用户前提及前文推导一致。\n");
         prompt_context.push_str("\n\n超载模式硬性要求（高代价追求完美，宁可多耗 token 也要交付无懈可击的结果）：\n【强制自查循环】每完成一个阶段，必须停下来自我审查：列出已做的事、验证的证据、可能的错误。发现任何可疑点立即用工具重新验证，禁止直接略过。任务收尾前至少执行一轮完整自查（review → verify → fix → re-verify）。\n【证据优先】所有关键事实必须经过工具或原始资料交叉验证（至少两个独立来源），不接受记忆中的二手信息；无法验证时明确标注「未验证」，绝不伪装成事实。\n【结构化交付】先定义问题、限制条件、成功标准与失败边界，再动手；执行中记录关键路径与风险点；结束时逐项对照成功标准验收，每一项都要给出通过/未通过的证据。\n【深度拆解】复杂任务必须拆解为可验证的子任务，逐步推进，每步都有可检查的中间产物；禁止一次输出无法验证的笼统结论。\n【诚实分级】严格区分事实、推断、假设、建议与结论；没有证据时说「不知道」，绝不编造、推测性填充。\n【完美主义】输出前问自己：是否还有更优解？是否遗漏边界情况？是否考虑了失败模式？如果答案是「可能」，继续完善。未达到全部 Success Criteria 不得声称完成，宁可用更多轮次和更长输出换确定性。\n");
     }
     let mut routed_skills = Vec::new();
-    if !recovery && prompt.chars().count() >= 24 {
+    if !chat_only && !recovery && prompt.chars().count() >= 24 {
         let router = SkillRouter::load(&state.home)?;
         let routed = router.route(
             prompt,
@@ -7922,11 +8204,11 @@ async fn run_turn(
     // 注入已配置 MCP 清单：agent 需要知道装了哪些 MCP、状态如何、能调哪些工具。
     let mcp_runtime = Arc::new(McpRuntime::load(&state.home).await);
     let mcp_inventory = mcp_runtime.inventory();
-    if !mcp_inventory.is_empty() {
+    if !chat_only && !mcp_inventory.is_empty() {
         prompt_context.push_str("\n\n");
         prompt_context.push_str(&mcp_inventory);
     }
-    if global_memory {
+    if global_memory && !chat_only {
         let memory_context = MemoryManager::new(&state.home, &cwd).prompt_context();
         if !memory_context.is_empty() {
             prompt_context
@@ -8024,6 +8306,7 @@ async fn run_turn(
     }
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(effective_max_tool_rounds)
+        .with_chat_only(chat_only)
         .with_provider_retry_policy(
             connection_settings.provider_retry_count,
             connection_settings.reconnect_initial_delay_ms,
@@ -8286,8 +8569,19 @@ struct BrowserUsageState {
     turn_output_tokens: u64,
     turn_cache_data_available: bool,
     turn_active: bool,
-    /** 本轮开始时间。真正的一轮耗时：ModelUsage 首次出现 → TurnCompleted。 */
+    /**
+     * 本轮开始时间 = 本轮第一次「开始思考」（ModelStarted round 1）。
+     *
+     * 用户 1.5.4 第 5 项：首字必须从「开始思考」算，而不是从模型返回用量算。
+     * 之前这里在第一次 ModelUsage 才取时间，等于把首字延迟直接抹成 0。
+     */
     turn_started_at: Option<Instant>,
+    /** 本轮第一个正文/思考增量的时刻，用来算首字耗时。 */
+    turn_first_token_at: Option<Instant>,
+    /** 上一轮结束时的总耗时；结束后继续展示，直到下一轮开始才归零。 */
+    turn_last_elapsed_ms: u64,
+    /** 上一轮首字耗时（毫秒）；None = 本轮还没出首字。 */
+    turn_first_token_ms: Option<u64>,
     context_used_tokens: u64,
     context_window_tokens: u64,
 }
@@ -8358,26 +8652,77 @@ impl BrowserObserver {
         event["context_categories"] = json!(self.context_categories);
         self.task.push_event(event);
     }
+
+    /**
+     * 记录本轮首字时刻（只记第一次）。
+     *
+     * 思考（reasoning_chunk）和正文（text_chunk）都算「首字」：用户看到的第一段
+     * 输出就是它。记完立刻推一次 usage，前端「首字」数字才会在出首字那一刻出现，
+     * 而不是等到本轮结束。
+     */
+    fn mark_first_token(&self) {
+        let recorded = {
+            let Ok(mut state) = self.usage.lock() else {
+                return;
+            };
+            if state.turn_first_token_at.is_some() {
+                false
+            } else if let Some(started) = state.turn_started_at {
+                state.turn_first_token_at = Some(Instant::now());
+                state.turn_first_token_ms =
+                    Some(Instant::now().saturating_duration_since(started).as_millis() as u64);
+                true
+            } else {
+                false
+            }
+        };
+        if recorded {
+            self.send_usage();
+        }
+    }
 }
 
 fn browser_usage_event(state: BrowserUsageState) -> Value {
     let total_tokens = state.input_tokens.saturating_add(state.output_tokens);
-    // 本轮瞬时速率（token/s）：本轮输出 token ÷ 本轮已耗时。模型输出过程中实时刷新；
-    // 结束后的 usage_update 由 TurnCompleted 触发、带完整耗时，速率即本轮准确值。
-    let elapsed_secs = state
+    // 实时耗时：进行中读计时器，结束后沿用上一轮的定格值。
+    let turn_elapsed_ms = state
         .turn_started_at
-        .map(|started| started.elapsed().as_secs_f64())
-        .filter(|value| *value > 0.0)
-        .unwrap_or(0.0);
-    let turn_rate = if elapsed_secs > 0.0 && state.turn_output_tokens > 0 {
-        state.turn_output_tokens as f64 / elapsed_secs
+        .map(|started| started.elapsed().as_millis() as u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(state.turn_last_elapsed_ms);
+    // 首字耗时：进行中还没出首字时是 None（前端显示「等待首字」），
+    // 出了首字就定格，不会随输出继续变大。
+    let first_token_ms = state.turn_first_token_ms.or_else(|| {
+        state
+            .turn_started_at
+            .zip(state.turn_first_token_at)
+            .map(|(started, first)| first.saturating_duration_since(started).as_millis() as u64)
+    });
+    // 输出速率（token/s）＝ 本轮输出 token ÷ **真正在出字的那段时间**。
+    //
+    // 分母要扣掉首字等待：等首字的时间里模型一个字都没输出，把它算进速率会让
+    // 慢模型看起来更慢、也让同一个模型在不同提示词下忽快忽慢。首字还没出来时
+    // 分母为 0，速率就是 0（前端显示 --），不编一个数出来。
+    let decode_secs = (turn_elapsed_ms.saturating_sub(first_token_ms.unwrap_or(turn_elapsed_ms)))
+        as f64
+        / 1000.0;
+    let turn_rate = if decode_secs > 0.0 && state.turn_output_tokens > 0 {
+        state.turn_output_tokens as f64 / decode_secs
     } else {
         0.0
     };
-    let context_ratio = if state.context_window_tokens == 0 {
-        0.0
+    // 上下文窗口未知时发 null 而不是 0：前端 `??` 会退回上一个已知值，
+    // 发 0 会把右上角那个环清零（"刚进来什么都没"的另一个原因）。
+    let (context_used, context_window, context_ratio) = if state.context_window_tokens == 0 {
+        (None, None, None)
     } else {
-        (state.context_used_tokens as f64 / state.context_window_tokens as f64).min(1.0)
+        (
+            Some(state.context_used_tokens),
+            Some(state.context_window_tokens),
+            Some(
+                (state.context_used_tokens as f64 / state.context_window_tokens as f64).min(1.0),
+            ),
+        )
     };
     json!({
         "event_type": "usage_update",
@@ -8386,8 +8731,8 @@ fn browser_usage_event(state: BrowserUsageState) -> Value {
             "cached_input_tokens": state.cached_input_tokens,
             "output_tokens": state.output_tokens,
             "total_tokens": total_tokens,
-            "context_used_tokens": state.context_used_tokens,
-            "context_window_tokens": state.context_window_tokens,
+            "context_used_tokens": context_used,
+            "context_window_tokens": context_window,
             "context_ratio": context_ratio,
             "cache_hit_rate": state.cache_data_available.then(|| {
                 if state.cache_observed_input_tokens == 0 { 0.0 } else {
@@ -8403,11 +8748,12 @@ fn browser_usage_event(state: BrowserUsageState) -> Value {
                 }
             }),
             "turn_cache_data_available": state.turn_cache_data_available,
+            "turn_input_tokens": state.turn_input_tokens,
             "turn_output_tokens": state.turn_output_tokens,
-            "turn_elapsed_ms": state
-                .turn_started_at
-                .map(|started| started.elapsed().as_millis() as u64)
-                .unwrap_or(0),
+            // 本轮总 token = 本轮输入 + 本轮输出（多轮工具调用已累加）。
+            "turn_total_tokens": state.turn_input_tokens.saturating_add(state.turn_output_tokens),
+            "turn_elapsed_ms": turn_elapsed_ms,
+            "turn_first_token_ms": first_token_ms,
             "turn_rate_tps": turn_rate,
         },
     })
@@ -8478,13 +8824,15 @@ fn update_reasoning_stats(
     effort: &str,
     usage: &coomi_engine::TokenUsage,
     elapsed: Duration,
+    provider: &str,
+    model: &str,
 ) {
     let lock = USAGE_FILE_LOCK.get_or_init(|| StdMutex::new(()));
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut aggregates = load_reasoning_aggregates(home);
     let aggregate = aggregates.entry(effort.to_owned()).or_default();
     add_reasoning_sample(aggregate, usage, elapsed);
-    append_usage_ledger(home, effort, usage, elapsed);
+    append_usage_ledger(home, effort, usage, elapsed, provider, model);
     if let Err(error) = save_reasoning_aggregates(home, &aggregates) {
         eprintln!("[usage] failed to save reasoning statistics: {error}");
     }
@@ -8508,12 +8856,22 @@ async fn session_billing(State(state):State<AppState>,AxumPath(id):AxumPath<Stri
 
 fn usage_ledger_path(home: &Path) -> PathBuf { home.join("usage").join("ledger.jsonl") }
 
-fn append_usage_ledger(home: &Path, effort: &str, usage: &coomi_engine::TokenUsage, elapsed: Duration) {
+fn append_usage_ledger(
+    home: &Path,
+    effort: &str,
+    usage: &coomi_engine::TokenUsage,
+    elapsed: Duration,
+    provider: &str,
+    model: &str,
+) {
     let path = usage_ledger_path(home);
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
     let entry = json!({
         "timestamp_ms": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         "reasoning_effort": effort,
+        // 1.5.4 第 7 项：全局用量要按模型统计，流水里必须留下是哪个厂商、哪个模型。
+        "provider_id": provider,
+        "model": model,
         "input_tokens": usage.input_tokens,
         "cached_input_tokens": usage.cached_input_tokens,
         "output_tokens": usage.output_tokens,
@@ -8535,20 +8893,93 @@ async fn usage_ledger(
     let to = params.get("to").and_then(|v| v.parse::<i64>().ok()).unwrap_or(now);
     let mut records = Vec::new();
     let mut input = 0u64; let mut cached = 0u64; let mut output = 0u64; let mut total = 0u64;
+    // 1.5.4 第 7 项：按模型、按天聚合。两者都在同一次读盘里算完，前端不必再取一遍。
+    let mut by_model: std::collections::BTreeMap<(String, String), [u64; 6]> =
+        std::collections::BTreeMap::new();
+    let mut by_day: std::collections::BTreeMap<String, [u64; 4]> =
+        std::collections::BTreeMap::new();
     if let Ok(text) = fs::read_to_string(usage_ledger_path(&state.home)) {
         for line in text.lines().rev().take(10000) {
             let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
             let timestamp = value.get("timestamp_ms").and_then(Value::as_i64).unwrap_or(0);
             if timestamp < from || timestamp > to { continue; }
-            input += value.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-            cached += value.get("cached_input_tokens").and_then(Value::as_u64).unwrap_or(0);
-            output += value.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
-            total += value.get("total_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let record_input = value.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let record_cached = value.get("cached_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let record_output = value.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let record_total = value.get("total_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let record_elapsed = value.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0);
+            input += record_input;
+            cached += record_cached;
+            output += record_output;
+            total += record_total;
+            // 老流水没有 provider/model 字段：单独归到「未记录模型」，不硬猜。
+            let provider = value.get("provider_id").and_then(Value::as_str).unwrap_or("").to_owned();
+            let model = value.get("model").and_then(Value::as_str).unwrap_or("").to_owned();
+            let model_key = (
+                if provider.is_empty() { "unknown".to_owned() } else { provider },
+                if model.is_empty() { "未记录模型".to_owned() } else { model },
+            );
+            let slot = by_model.entry(model_key).or_default();
+            slot[0] += record_input;
+            slot[1] += record_cached;
+            slot[2] += record_output;
+            slot[3] += record_total;
+            slot[4] += record_elapsed;
+            slot[5] += 1;
+            use chrono::TimeZone as _;
+            let day = chrono::Local
+                .timestamp_millis_opt(timestamp)
+                .single()
+                .map(|time| time.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "未知日期".to_owned());
+            let day_slot = by_day.entry(day).or_default();
+            day_slot[0] += record_input;
+            day_slot[1] += record_output;
+            day_slot[2] += record_total;
+            day_slot[3] += 1;
             records.push(value);
         }
     }
     records.reverse();
-    Ok(Json(json!({ "from": from, "to": to, "input_tokens": input, "cached_input_tokens": cached, "output_tokens": output, "total_tokens": total, "requests": records.len(), "records": records })))
+    let by_model: Vec<Value> = by_model
+        .into_iter()
+        .map(|((provider_id, model), sums)| {
+            json!({
+                "provider_id": provider_id,
+                "model": model,
+                "input_tokens": sums[0],
+                "cached_input_tokens": sums[1],
+                "output_tokens": sums[2],
+                "total_tokens": sums[3],
+                "elapsed_ms": sums[4],
+                "requests": sums[5],
+            })
+        })
+        .collect();
+    let by_day: Vec<Value> = by_day
+        .into_iter()
+        .map(|(date, sums)| {
+            json!({
+                "date": date,
+                "input_tokens": sums[0],
+                "output_tokens": sums[1],
+                "total_tokens": sums[2],
+                "requests": sums[3],
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "from": from,
+        "to": to,
+        "input_tokens": input,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "total_tokens": total,
+        "requests": records.len(),
+        "by_model": by_model,
+        "by_day": by_day,
+        "records": records,
+    })))
 }
 
 async fn balance_status(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
@@ -8760,10 +9191,12 @@ impl AgentObserver for BrowserObserver {
     fn on_event(&self, event: &AgentEvent) {
         match event {
             AgentEvent::Text(content) | AgentEvent::TextDelta(content) => {
+                self.mark_first_token();
                 self.task
                     .push_event(json!({"event_type": "text_chunk", "content": content}));
             }
             AgentEvent::ReasoningDelta(content) => {
+                self.mark_first_token();
                 self.task
                     .push_event(json!({"event_type": "reasoning_chunk", "content": content}));
             }
@@ -8885,17 +9318,31 @@ impl AgentObserver for BrowserObserver {
                     state.turn_output_tokens = turn.output_tokens;
                     state.turn_cache_data_available = turn.cache_data_available;
                     state.turn_active = false;
-                    // 取走本轮耗时后立即清空，下一轮从零开始。
+                    // 取走本轮耗时后定格到 turn_last_elapsed_ms：本轮结束后界面仍然
+                    // 显示这一轮的真实耗时，直到下一轮「开始思考」才归零。
                     let elapsed = state
                         .turn_started_at
                         .take()
                         .map(|started| started.elapsed())
+                        .or_else(|| {
+                            (state.turn_last_elapsed_ms > 0).then(|| {
+                                Duration::from_millis(state.turn_last_elapsed_ms)
+                            })
+                        })
                         .unwrap_or_default();
+                    state.turn_last_elapsed_ms = elapsed.as_millis() as u64;
                     (elapsed, turn.total_tokens())
                 } else {
                     (Duration::from_secs(0), turn.total_tokens())
                 };
-                update_reasoning_stats(&self.home, &self.reasoning_effort, turn, elapsed);
+                update_reasoning_stats(
+                    &self.home,
+                    &self.reasoning_effort,
+                    turn,
+                    elapsed,
+                    &self.billing_provider,
+                    &self.billing_model,
+                );
                 // 前端「用量统计」需要 token/s：写进 ledger 的成本很高（要重读文件），
                 // 所以这里通过 reasoning_efforts 的汇总字段兜底 —— 前端的 TopBar 已能读到
                 // average_total_tokens / average_duration_ms，二者相除就是速率。
@@ -8972,6 +9419,11 @@ impl AgentObserver for BrowserObserver {
                     state.turn_output_tokens = 0;
                     state.turn_cache_data_available = false;
                     state.turn_active = true;
+                    // 「开始思考」就起表：本轮耗时与首字延迟都从这里算。
+                    state.turn_started_at = Some(Instant::now());
+                    state.turn_first_token_at = None;
+                    state.turn_first_token_ms = None;
+                    state.turn_last_elapsed_ms = 0;
                 }
                 self.send_usage();
             }
@@ -9097,6 +9549,27 @@ async fn system_prompt(
 /// 给纯命令行任务用的（工具只剩 shell 与看图），一句话人设足够。
 pub(crate) const MINIMAL_PERSONA: &str = "You are a helpful software engineer assistant.";
 
+/// 纯聊天（推理强度「关闭」）的系统提示词。
+///
+/// 用户 1.5.4 第 14 项的要求：不思考就是纯聊天 —— 不追加 agent 规则、
+/// 不给工具、不读技能与记忆，只保留用户自己写的人格。所以这里只拼两段：
+///   ① 「身份定位」里用户写的 custom prompt（没有就不写）；
+///   ② 一句说清「现在没有工具」的行为约束。
+fn chat_only_prompt(home: &Path) -> String {
+    let mut prompt = String::new();
+    let custom = custom_prompt(home);
+    if !custom.trim().is_empty() {
+        prompt.push_str("## Custom Identity (身份定位)\n");
+        prompt.push_str(custom.trim());
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(
+        "你现在处于纯聊天模式：像朋友一样自然对话，不使用任何工具，不执行命令、不读写文件、不调用接口、不假装已经执行了任何操作。\
+         如果用户需要动手完成任务，直接告诉他切回「自动 / 低 / 中」等推理档位。回答简洁、真诚、有温度。",
+    );
+    prompt
+}
+
 async fn system_prompt_with_cognitive(
     home: &Path,
     cwd: &Path,
@@ -9128,6 +9601,9 @@ async fn system_prompt_with_cognitive(
         prompt.push_str(custom.trim());
         prompt.push_str("\n\n");
     }
+    // 插件提示词（1.5.4 第 11 项）：只收「已启用 + manifest 无错」的插件。
+    // 放在身份定位之后、宿主规则之前，让插件能调整风格与关注点，但压不过安全边界。
+    prompt.push_str(&crate::plugins::enabled_prompt_block(home));
     prompt.push_str(
         "You are Comax, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. When requirements, preferences, or consequential choices are unclear, use request_user_input proactively instead of guessing; group related questions into one batch when practical. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. You may use the web freely: web_search for search, fetch to read pages, and shell / curl / wget for downloads, API calls, and file access. If web_search reports unavailable, report it once and continue with other approaches rather than looping command-line searches.",
     );

@@ -14,6 +14,7 @@ import android.content.Intent;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import org.json.JSONObject;
 
@@ -84,22 +85,45 @@ public final class CoomiAccessibilityService extends AccessibilityService {
     private volatile long powerHandledAt = 0L;
 
     private final Handler powerHandler = new Handler(Looper.getMainLooper());
+    /**
+     * 电源菜单清扫器：从"唤醒助手"开始，每 180ms 尝试关掉系统自己弹的电源菜单，
+     * 直到用户松手或按满 3 秒（那时菜单是我们主动弹出的，必须保留）。
+     *
+     * 只清扫 **本次按键期间**（最多 3.2 秒）出现的菜单，用户自己在别处调出的
+     * 电源菜单完全不受影响。
+     */
+    private final Runnable powerDialogSweep = new Runnable() {
+        @Override public void run() {
+            if (powerDownAt == 0L || powerMenuShown) return;
+            if (android.os.SystemClock.elapsedRealtime() - powerDownAt > 3_200L) return;
+            dismissSystemPowerDialogIfOurs(true);
+            powerHandler.postDelayed(this, 180L);
+        }
+    };
+
     private final Runnable powerWakeTask = () -> {
         if (powerDownAt == 0L || powerWoke) return;
         powerWoke = true;
         powerHandledAt = android.os.SystemClock.elapsedRealtime();
         wakeAssistant();
+        // 关键补丁（1.5.4 第 8 项）：不少 ROM 的电源键长按在系统层自己计时，
+        // 即使我们在无障碍层把 KEY_DOWN 消费掉，约 0.5s 时仍然会弹出关机菜单，
+        // 于是"先看到重启键、助手在后面"。这里在唤醒助手之后持续清扫这个菜单：
+        // 只要用户还没按到 3 秒（powerMenuShown=false），它一出现就关掉。
+        powerHandler.removeCallbacks(powerDialogSweep);
+        powerHandler.post(powerDialogSweep);
     };
     private final Runnable powerMenuTask = () -> {
         if (powerDownAt == 0L || powerMenuShown) return;
         powerMenuShown = true;
         powerHandledAt = android.os.SystemClock.elapsedRealtime();
+        // 用户按到 3 秒，这一次菜单是我们要的：停止清扫，别再把它关掉。
+        powerHandler.removeCallbacks(powerDialogSweep);
         try {
             // 6 = GLOBAL_ACTION_POWER_DIALOG（API 21+，无障碍服务合法能力）
             performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
         } catch (Exception ignored) { /* 个别 ROM 不实现该动作 */ }
     };
-
     /** describeScreen 缓存（150ms） */
     private final Object screenCacheLock = new Object();
     private String cachedScreen;
@@ -237,16 +261,58 @@ public final class CoomiAccessibilityService extends AccessibilityService {
      * 时，才尝试用返回键关掉它 —— 用户自己按出来的菜单绝不会被我们关。
      */
     private void dismissSystemPowerDialogIfOurs() {
+        dismissSystemPowerDialogIfOurs(false);
+    }
+
+    /**
+     * @param duringHold true = 由 {@link #powerDialogSweep} 调用：本次按键还没到 3 秒，
+     *                   任何电源菜单都不该存在，直接关掉；false = 事件驱动的旧路径，
+     *                   只在"我们自己刚动过电源键"的短窗口内关，避免误关用户的菜单。
+     */
+    private void dismissSystemPowerDialogIfOurs(boolean duringHold) {
+        // 我们主动弹出的菜单（按满 3 秒）永远不关。
+        if (powerMenuShown) return;
         long handledAt = powerHandledAt;
         if (handledAt == 0L) return;
-        if (android.os.SystemClock.elapsedRealtime() - handledAt > 1200L) return;
-        String pkg = foregroundPackage;
-        if (pkg == null) return;
-        boolean systemUi = pkg.equals("com.android.systemui") || pkg.equals("android");
-        if (!systemUi) return;
+        if (!duringHold
+            && android.os.SystemClock.elapsedRealtime() - handledAt > 1200L) return;
+        if (!powerDialogVisible()) return;
         try {
             performGlobalAction(GLOBAL_ACTION_BACK);
         } catch (Exception ignored) { /* 关不掉就算了，不能让异常冒到事件循环 */ }
+    }
+
+    /**
+     * 屏幕最上面是不是系统的电源菜单。
+     *
+     * 只看前台包名不够稳：部分 ROM 的关机菜单是 systemui 里的一个 Dialog，
+     * `foregroundPackage` 可能还停在上一个 App 上。所以再看一遍窗口列表，
+     * 用包名 + 类名双条件判断（类名里带 globalactions / shutdown 就是它）。
+     */
+    private boolean powerDialogVisible() {
+        String pkg = foregroundPackage;
+        if ("com.android.systemui".equals(pkg) || "android".equals(pkg)) return true;
+        try {
+            java.util.List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null) return false;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                CharSequence packageName = root.getPackageName();
+                CharSequence className = root.getClassName();
+                String name = packageName == null ? "" : packageName.toString();
+                String klass = className == null ? "" : className.toString().toLowerCase();
+                if (!name.equals("com.android.systemui") && !name.equals("android")) continue;
+                if (klass.contains("globalaction") || klass.contains("shutdown")
+                    || klass.contains("power") || klass.contains("dialog")) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            // 拿不到窗口列表就算了，退回前台包名判断
+        }
+        return false;
     }
 
     /** @return true 表示已经把唤醒请求交出去（可以安全地消费事件）。 */

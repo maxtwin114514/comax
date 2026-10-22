@@ -11,6 +11,7 @@ import { useConfigStore } from '@/stores/config'
 import { formatSessionTime, useSessionsStore, type SessionMeta } from '@/stores/sessions'
 import { GLOBAL_SESSION_ID } from '@/bridge/life'
 import CoomiIcon from './CoomiIcon.vue'
+import PluginSlot from './PluginSlot.vue'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
@@ -210,6 +211,9 @@ function openDashboard() {
         </template>
       </div>
 
+      <!-- 插件插槽：侧边栏底部（在返回控制台与设置之上） -->
+      <div class="plugin-sidebar"><PluginSlot name="sidebar" /></div>
+
       <footer class="dfoot">
         <button class="frow console" @click="openDashboard">
           <CoomiIcon name="terminal" :size="20" />
@@ -243,6 +247,8 @@ function openDashboard() {
 </template>
 
 <style scoped>
+.plugin-sidebar { padding: 0 10px 6px; }
+.plugin-sidebar:empty { display: none; }
 /*
  * 侧栏是"底图"：层级必须**低于**对话界面（.shell 是 10），这样它平时被对话界面
  * 盖住（不常驻、不显示），只有对话界面向右滑开、让出这条宽度时才露出来。

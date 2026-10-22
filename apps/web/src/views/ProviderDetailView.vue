@@ -5,6 +5,7 @@ import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 import ModelPickerSheet from '@/components/ModelPickerSheet.vue'
 import ThemeSelect, { type ThemeSelectOption } from '@/components/ThemeSelect.vue'
+import { apiSend } from '@/bridge/http'
 import {
   BUILTIN_PROVIDER_PRESETS,
   useConfigStore,
@@ -22,6 +23,8 @@ interface ProviderDraft {
   apiKey: string
   apiKeys: string[]
   models: string[]
+  /** 当前选中的模型（与服务端 ProviderSettings.model 对应）。 */
+  model: string
   modelContextWindows: Record<string, number>
   baseUrl: string
   protocol: ProviderProtocol
@@ -120,6 +123,7 @@ function emptyDraft(id = '', name = ''): ProviderDraft {
     apiKey: '',
     apiKeys: [],
     models: [],
+    model: '',
     modelContextWindows: {},
     baseUrl: preset?.baseUrl || '',
     protocol: preset?.protocol || 'openai_compatible',
@@ -137,6 +141,7 @@ function draftFromProvider(value: ProviderConfig | null): ProviderDraft {
     apiKey: '',
     apiKeys: [],
     models: [...value.models],
+    model: value.model || value.models[0] || '',
     modelContextWindows: { ...(value.modelContextWindows ?? {}) },
     baseUrl: value.baseUrl || '',
     protocol: normalizeProtocol(value.toolProtocol || value.type),
@@ -428,7 +433,44 @@ async function saveConfigAndBack() {
 }
 
 async function saveModels() {
+  // 1.5.4 第 13 项：保存模型**之前**先问一次模型支持哪些思考强度。
+  // 一次保存只探一个模型（当前选中的那个）；其它模型在切到它时再探，
+  // 免得存 10 个模型就要打 60 次探针请求。
+  await probeThinkingEfforts()
   return saveProvider('模型列表已保存')
+}
+
+/**
+ * 询问引擎「这个模型到底认哪些强度」，把结果写进 modelParameters[model].thinkingEfforts。
+ *
+ * 失败不阻断保存：探测接口会明确返回 source=inferred 或报错，这里只在提示条里说清楚，
+ * 绝不用一份猜出来的清单覆盖用户已经手动改过的配置。
+ */
+const probingEffort = ref('')
+async function probeThinkingEfforts(model?: string) {
+  if (!draft.value) return
+  const target = model || draft.value.model
+  if (!target || !target.trim()) return
+  probingEffort.value = target
+  try {
+    const result = await apiSend<{ efforts: string[]; source: string; hint: string }>(
+      `/api/providers/${encodeURIComponent(draft.value.id)}/probe-reasoning`,
+      'POST',
+      { model: target },
+    )
+    const params = modelParams(target)
+    if (Array.isArray(result.efforts) && result.efforts.length > 0) {
+      params.thinkingEfforts = result.efforts
+    }
+    message.value = result.source === 'probe'
+      ? `已实测 ${target} 可用强度：${result.efforts.join(' / ')}`
+      : `未能实测 ${target}（${result.hint}）`
+  } catch (cause) {
+    // 探测失败不拦保存：保留原配置，只在提示里说一声。
+    message.value = `强度探测失败（不影响保存）：${String(cause)}`
+  } finally {
+    probingEffort.value = ''
+  }
 }
 
 async function activateCurrentProvider() {
@@ -729,6 +771,17 @@ function openModelConfig() {
                 </label>
               </div>
               <p class="mapping-note">对话设置中的推理档位会按上表转换后写入 <code>{{ modelParams(model).reasoningField }}</code>；自动档不发送该字段。</p>
+              <!--
+                1.5.4 第 13 项：可用强度由模型自己说话。
+                「保存模型列表」前会自动探测一次；这里也可以单独重测。
+              -->
+              <div class="reasoning-field">
+                <span>可用思考强度</span>
+                <button type="button" class="mapping-trigger" @click="probeThinkingEfforts(model)">
+                  {{ probingEffort === model ? '探测中…' : (modelParams(model).thinkingEfforts?.join(' / ') || '未探测，点击获取') }}
+                </button>
+              </div>
+              <p class="mapping-note">探测结果决定输入区那排档位（关闭/自动 + 这些值）；探测不到时按协议给一份标注为「推断」的清单。</p>
             </section>
             <div class="capability-overrides">
               <span>模型能力</span>

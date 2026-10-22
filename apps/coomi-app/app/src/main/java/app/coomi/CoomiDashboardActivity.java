@@ -195,6 +195,9 @@ public class CoomiDashboardActivity extends Activity {
             startActivity(new Intent(this, CoomiBackupActivity.class)));
         mMaintenanceButton.setOnClickListener(v -> openCoomiRoute("#/maintenance"));
         mUsageButton.setOnClickListener(v -> openCoomiRoute("#/usage"));
+        // 报错日志走原生 Activity：它必须在引擎不可用时也能打开（1.5.4 第 12 项）。
+        findViewById(R.id.btn_error_log).setOnClickListener(v ->
+            startActivity(new Intent(this, CoomiLogActivity.class)));
         mDonateButton.setOnClickListener(v -> showDonateDialog());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
         mStorageSettingsButton.setOnClickListener(v -> openStorageSettings());
@@ -299,6 +302,10 @@ public class CoomiDashboardActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 「界面在前台」用 onResume/onPause 判定（不是 onStart/onStop）：
+        // 从控制台跳到对话页时是 A.onPause → B.onResume，用 onStop 会把
+        // 刚设好的 true 又覆盖成 false。只有这个标记为 true，引擎监控才允许拉起引擎。
+        CoomiEngineMonitor.setAppVisible(true);
         mRegistryRefreshRequested = false;
         String currentMode = CoomiTheme.getMode(this);
         String currentAppearance = CoomiTheme.appearanceSignature(this);
@@ -309,6 +316,12 @@ public class CoomiDashboardActivity extends Activity {
         }
         CoomiTheme.applyPageSystemBars(this);
         CoomiTheme.applyConsoleBackground(this, findViewById(R.id.coomi_dashboard_root));
+    }
+
+    @Override
+    protected void onPause() {
+        CoomiEngineMonitor.setAppVisible(false);
+        super.onPause();
     }
 
     private void openCoomiRoute(String route) {

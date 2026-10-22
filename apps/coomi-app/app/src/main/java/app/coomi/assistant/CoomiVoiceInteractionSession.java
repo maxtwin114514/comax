@@ -65,6 +65,10 @@ public final class CoomiVoiceInteractionSession extends VoiceInteractionSession 
 
     @Override public void onCreate() {
         super.onCreate();
+        // 真的弹出助手会话时才拉起引擎宿主（1.5.4 第 2 项）：
+        // 系统绑定 VoiceInteractionService 的时机太早（开机就会绑），
+        // 在那里启动引擎等于"没打开 App 也在后台跑引擎"。
+        CoomiVoiceInteractionService.wakeEngineHost();
         setUiEnabled(true);
         setKeepAwake(true);
         Window window = getWindow() == null ? null : getWindow().getWindow();

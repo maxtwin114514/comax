@@ -26,7 +26,12 @@ export interface ModelParameters {
   maxOutputTokens?: number
   reasoningEffort?: string
   reasoningField?: string
-  reasoningMapping?: Partial<Record<'low' | 'medium' | 'high' | 'xhigh', string>>
+  reasoningMapping?: Partial<Record<'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max', string>>
+  /**
+   * 这个模型实际可用的思考强度（保存模型时由引擎实测/推断得出）。
+   * 有值时输入区的强度选择器只显示这些档位 + 关闭/自动。
+   */
+  thinkingEfforts?: string[]
 }
 export interface CapabilityOverride { text?: boolean; vision?: boolean; image_generation?: boolean; reasoning?: boolean }
 export interface SubAgentConfig { id: string; providerId: string; model: string; description?: string }
@@ -151,6 +156,26 @@ export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
   { value: 'high', label: '高' },
   { value: 'xhigh', label: '超高' },
 ]
+
+/** 强度值 → 中文字面。模型声明里可能出现的每一种都要能显示。 */
+export const REASONING_EFFORT_LABELS: Record<string, string> = {
+  off: '关闭',
+  auto: '自动',
+  minimal: '极简',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+  max: '最高',
+}
+
+/**
+ * 未声明可用强度时的兜底档位。
+ *
+ * 用户 1.5.4 第 13 项明确要求去掉「高 / 超高」这两个默认项：它们既不是每家都支持，
+ * 又容易让用户以为选了就一定更强。默认只给 低 / 中，其余档位由模型自己声明。
+ */
+export const DEFAULT_THINKING_EFFORTS: string[] = ['low', 'medium']
 
 /** 取当前主题档位：优先 Android 原生偏好（JS 桥），其次 localStorage，默认跟随系统。 */
 export function readThemeMode(): ThemeMode {

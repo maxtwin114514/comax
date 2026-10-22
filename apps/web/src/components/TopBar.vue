@@ -13,6 +13,7 @@ import CoomiIcon from './CoomiIcon.vue'
 import { CNY_PER_USD, costWithPrice, fmtMoney, priceFor, type ModelPrice } from '@/utils/modelPrices'
 import CoomiMark from './CoomiMark.vue'
 import MorphBurger from './MorphBurger.vue'
+import PluginSlot from './PluginSlot.vue'
 
 const props = defineProps<{ menuOpen?: boolean }>()
 defineEmits<{ menu: [] }>()
@@ -105,6 +106,25 @@ const rateText = computed(() => {
   const rate = usage.turnRateTps || (usage.turnElapsedMs > 0 ? usage.turnOutputTokens / (usage.turnElapsedMs / 1000) : 0)
   return rate > 0 ? `${rate.toFixed(1)} tok/s` : '--'
 })
+/**
+ * 上下文面板的关键数字（1.5.4 第 3—6 项）。
+ *
+ * 耗时从「开始思考」起算（引擎在 ModelStarted 打点）；首字单独一栏，
+ * 没出首字就说「等待首字」，不拿 0 冒充；会话总 token 与本轮 token 都显示；
+ * 没有会话数据时给零值，而不是把整块藏起来。
+ */
+const turnFirstTokenText = computed(() => {
+  const value = session.usage?.turnFirstTokenMs
+  if (value == null) return session.isBusy ? '等待首字' : '--'
+  return formatDuration(value)
+})
+const sessionTotalTokens = computed(() => session.usage?.total ?? 0)
+/** 本轮耗时：0 表示这一轮还没开始计时，显示 -- 比显示 0ms 诚实。 */
+const turnElapsedText = computed(() => {
+  const value = session.usage?.turnElapsedMs ?? 0
+  return value > 0 ? formatDuration(value) : '--'
+})
+const turnTotalTokens = computed(() => session.usage?.turnTotalTokens ?? 0)
 
 function formatTokens(value: number): string {
   if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M'
@@ -315,6 +335,9 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
     </div>
     
 
+    <!-- 插件插槽：顶栏右侧（模型名与用量环之间） -->
+    <PluginSlot name="topbar" />
+
     <button class="usage-button" :aria-expanded="usageOpen" aria-label="上下文用量" @click="toggleUsage">
       <svg class="usage-ring" viewBox="0 0 36 36" aria-hidden="true">
         <circle class="usage-track" cx="18" cy="18" r="15" pathLength="100" />
@@ -404,10 +427,12 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
         </div>
 
         <div class="uc-stats">
-          <div><span>本轮耗时</span><strong>{{ formatDuration(session.usage.turnElapsedMs) }}</strong></div>
-          <div><span>工具累计</span><strong>{{ formatDuration(toolElapsedMs) }}</strong></div>
+          <div><span>本轮耗时</span><strong>{{ turnElapsedText }}</strong></div>
+          <div><span>首字</span><strong>{{ turnFirstTokenText }}</strong></div>
+          <div><span>本轮 Token</span><strong>{{ formatTokens(turnTotalTokens) }}</strong></div>
+          <div><span>会话 Token</span><strong>{{ formatTokens(sessionTotalTokens) }}</strong></div>
           <div><span>输出速率</span><strong>{{ rateText }}</strong></div>
-          <div><span>会话 Token</span><strong>{{ formatTokens(session.usage.total) }}</strong></div>
+          <div><span>工具累计</span><strong>{{ formatDuration(toolElapsedMs) }}</strong></div>
         </div>
 
         <div class="uc-cache">
@@ -427,7 +452,21 @@ watch(()=>session.runState,(v)=>{if(v==='idle'&&balanceOpen.value)void fetchBala
           </div>
         </div>
       </template>
-      <p v-else class="usage-empty">此对话尚无用量数据</p>
+      <!--
+        第 6 项：没有任何会话数据时也要给出结构，而不是一句「尚且没有」。
+        零值是真实值（这个会话确实还没花 token），比藏起来更好判断。
+      -->
+      <template v-else>
+        <div class="uc-stats">
+          <div><span>本轮耗时</span><strong>--</strong></div>
+          <div><span>首字</span><strong>--</strong></div>
+          <div><span>本轮 Token</span><strong>0</strong></div>
+          <div><span>会话 Token</span><strong>0</strong></div>
+          <div><span>输出速率</span><strong>--</strong></div>
+          <div><span>工具累计</span><strong>--</strong></div>
+        </div>
+        <p class="usage-empty">还没有用量数据：发一条消息后这里会实时更新。</p>
+      </template>
       <div class="usage-path">
         <span>会话标记路径</span>
         <button class="path-btn" @click="openPathPicker">{{ session.cwd || '点击选择' }}</button>

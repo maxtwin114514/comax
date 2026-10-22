@@ -73,12 +73,14 @@ test('模式面板：先画一帧收起态再翻展开态', () => {
   )
 })
 
-test('模式面板：堆叠升出后立刻摊开（1.5.2o7beta 起不再停顿）', () => {
+test('模式面板：先以折叠态出现，再摊开（1.5.4 第 10 项）', () => {
   // 独立的 spread 状态：堆叠可见与摊开必须是两个时刻
   assert.match(composer, /const panelSpread = ref\(false\)/)
   assert.match(composer, /class="mode-pop"[\s\S]{0,140}spread: panelSpread/)
-  // 用户明确取消停顿：STACK_PAUSE_MS 必须为 0（结构保留，将来要改回去只动这个数）
-  assert.match(composer, /const STACK_PAUSE_MS = 0\b/)
+  // 1.5.4 第 10 项：出现时必须先是**折叠**状态，短暂停留后才展开。
+  // 所以停顿必须是一个正数；写成 0 会让"折叠态"和"摊开"挤进同一帧，用户根本看不到那摞卡。
+  const pause = /const STACK_PAUSE_MS = (\d+)/.exec(composer)?.[1]
+  assert.ok(pause && Number(pause) > 0, '折叠态需要一段可见的停留时间')
   assert.match(
     composer,
     /spreadTimer = setTimeout\(\(\) => \{[\s\S]{0,120}panelSpread\.value = true[\s\S]{0,40}\}, EMERGE_MS \+ STACK_PAUSE_MS\)/,

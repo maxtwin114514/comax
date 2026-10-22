@@ -425,7 +425,7 @@ public class CoomiService extends Service {
     /** 引擎自身写入的指纹（~/.coomi/engine.version，MD5+版本）是否与 APK 内二进制一致。 */
     /** 引擎日志轮转：超限就只保留尾部，避免长期使用后把存储写满。 */
     private void rotateEngineLogIfHuge() {
-        File log = new File(CoomiConstants.ENGINE_LOG_PATH);
+        File log = new File(CoomiLogSettings.engineLogPath(this));
         if (!log.isFile() || log.length() <= ENGINE_LOG_MAX_BYTES) return;
         try {
             java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "rw");
@@ -448,8 +448,8 @@ public class CoomiService extends Service {
     }
 
     /** 取引擎日志尾部（排错用）。读不到就返回空串，绝不抛。 */
-    private static String tailEngineLog(int maxChars) {
-        File log = new File(CoomiConstants.ENGINE_LOG_PATH);
+    private String tailEngineLog(int maxChars) {
+        File log = new File(CoomiLogSettings.engineLogPath(this));
         if (!log.isFile()) return "";
         try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r")) {
             long length = raf.length();
@@ -630,6 +630,14 @@ public class CoomiService extends Service {
 
             // 日志先轮转：长期升级使用后 coomi.log 可能上百 MB，追加写会变慢甚至写失败。
             rotateEngineLogIfHuge();
+            // 日志路径可由用户在「报错日志」里改：先确保父目录存在且文件可写，
+            // 否则引擎一启动就因为重定向失败而秒退，用户还看不到任何原因。
+            String logProblem = CoomiLogSettings.prepareEngineLog(this);
+            if (logProblem != null) {
+                mIsEngineStarting = false;
+                Logger.logError(LOG_TAG, "Engine log not writable: " + logProblem);
+                return new CommandResult(false, "", logProblem, -1);
+            }
 
             String lastFailure = "";
             for (int attempt = 1; attempt <= 2; attempt++) {
@@ -640,7 +648,7 @@ public class CoomiService extends Service {
                     // 告诉引擎它的配置目录（也就是 .coomi），PoW 求解队列要用它定位。
                     + "export COOMI_HOME=" + shellQuote(CoomiConstants.COOMI_CONFIG_DIR) + "; "
                     + "export RUST_BACKTRACE=1; cd " + shellQuote(home()) + "; "
-                    + "exec >>" + shellQuote(CoomiConstants.ENGINE_LOG_PATH) + " 2>&1; "
+                    + "exec >>" + shellQuote(CoomiLogSettings.engineLogPath(this)) + " 2>&1; "
                     + "exec " + shellQuote(binary.getAbsolutePath())
                     + " --home " + shellQuote(CoomiConstants.COOMI_CONFIG_DIR)
                     + " --cwd " + shellQuote(home())
@@ -1005,9 +1013,9 @@ public class CoomiService extends Service {
         });
     }
 
-    public static String readEngineLogTail(int count) {
+    public static String readEngineLogTail(android.content.Context context, int count) {
         java.util.List<String> lines = new java.util.ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader(CoomiConstants.ENGINE_LOG_PATH))) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(CoomiLogSettings.engineLogPath(context)))) {
             String line;
             while ((line = reader.readLine()) != null) lines.add(line);
         } catch (Exception ignored) {

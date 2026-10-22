@@ -45,6 +45,12 @@ export const useSessionStore = defineStore('session', () => {
     turnRateTps: number
     turnElapsedMs: number
     turnOutputTokens: number
+    /** 本轮输入 token（含多轮工具调用的累加）。 */
+    turnInputTokens: number
+    /** 本轮总 token = 本轮输入 + 本轮输出。 */
+    turnTotalTokens: number
+    /** 本轮首字耗时（毫秒）；null = 还没出首字，界面要显示「等待首字」。 */
+    turnFirstTokenMs: number | null
     reasoningEfforts: Partial<Record<ReasoningEffort, ReasoningEffortStats>>
     contextCategories: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
   } | null>(null)
@@ -424,6 +430,9 @@ export const useSessionStore = defineStore('session', () => {
           turnRateTps: ev.usage.turn_rate_tps ?? previous?.turnRateTps ?? 0,
           turnElapsedMs: ev.usage.turn_elapsed_ms ?? previous?.turnElapsedMs ?? 0,
           turnOutputTokens: ev.usage.turn_output_tokens ?? previous?.turnOutputTokens ?? 0,
+          turnInputTokens: ev.usage.turn_input_tokens ?? previous?.turnInputTokens ?? 0,
+          turnTotalTokens: ev.usage.turn_total_tokens ?? previous?.turnTotalTokens ?? 0,
+          turnFirstTokenMs: ev.usage.turn_first_token_ms ?? previous?.turnFirstTokenMs ?? null,
           reasoningEfforts: ev.reasoning_efforts ?? previous?.reasoningEfforts ?? {},
           contextCategories: ev.context_categories ?? previous?.contextCategories ?? {},
         }
@@ -533,8 +542,19 @@ export const useSessionStore = defineStore('session', () => {
           turnRateTps: usage.value?.turnRateTps ?? 0,
           turnElapsedMs: usage.value?.turnElapsedMs ?? 0,
           turnOutputTokens: usage.value?.turnOutputTokens ?? 0,
+          turnInputTokens: usage.value?.turnInputTokens ?? 0,
+          turnTotalTokens: usage.value?.turnTotalTokens ?? 0,
+          turnFirstTokenMs: usage.value?.turnFirstTokenMs ?? null,
           reasoningEfforts: usage.value?.reasoningEfforts ?? {},
           contextCategories: usage.value?.contextCategories ?? {},
+        }
+        // 第 6 项：还没对话过也要能显示上下文 —— session_loaded 现在带窗口与已用量。
+        const window = u.context_window_tokens ?? 0
+        const used = u.context_used_tokens ?? 0
+        if (window > 0) {
+          usage.value.contextWindow = window
+          usage.value.contextUsed = used
+          usage.value.contextRatio = Math.min(1, used / window)
         }
         if (u.total_tokens != null) {
           sessions.updateTokens(sessionId.value, u.total_tokens)

@@ -1,12 +1,56 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
 import { useConfigStore } from './stores/config'
 import { gsap } from './composables/useGsap'
+import { useSessionStore } from './stores/session'
+import { refresh as refreshPlugins, savePrompt as savePluginPrompt } from './stores/plugins'
+import { emitPluginEvent, registerPetLayer } from './plugins/host'
 
 const router = useRouter()
 const direction = ref<'forward' | 'back'>('forward')
 const config = useConfigStore()
+const session = useSessionStore()
+
+// ── 插件宿主（1.5.4 第 11 项）────────────────────────────────────────────
+const petLayer = ref<HTMLElement | null>(null)
+const toast = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showToast(text: string) {
+  toast.value = text
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toast.value = ''; toastTimer = null }, 2400)
+}
+
+/** 插件通过 comax.prompt() 提交的文字，由宿主落盘（前端不直接发请求）。 */
+function onPluginPrompt(event: Event) {
+  const detail = (event as CustomEvent<{ id: string; text: string }>).detail
+  if (detail?.id) void savePluginPrompt(detail.id, detail.text ?? '')
+}
+function onPluginToast(event: Event) {
+  const detail = (event as CustomEvent<{ id: string; text: string }>).detail
+  if (detail?.text) showToast(`[${detail.id}] ${detail.text}`)
+}
+
+// 会话事件转给插件：turn-start / turn-end。插件据此做动效或桌宠反应。
+watch(() => session.isBusy, busy => {
+  emitPluginEvent(busy ? 'turn-start' : 'turn-end', { sessionId: session.sessionId })
+})
+
+onMounted(() => {
+  registerPetLayer(petLayer.value)
+  window.addEventListener('comax:plugin-prompt', onPluginPrompt)
+  window.addEventListener('comax:plugin-toast', onPluginToast)
+  // 引擎没起来时 refresh 会失败，这是正常的：插件页里会显示错误，不阻塞界面。
+  void refreshPlugins()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('comax:plugin-prompt', onPluginPrompt)
+  window.removeEventListener('comax:plugin-toast', onPluginToast)
+  registerPetLayer(null)
+})
 
 router.beforeEach((to, from) => {
   const depth = (path: string) => path.split('/').filter(Boolean).length
@@ -39,6 +83,11 @@ watch(() => config.allAnimationsOff, (off) => {
       <component :is="Component" />
     </Transition>
   </RouterView>
+  <!-- 桌宠层：插件通过 comax.pet() 往里放东西；层级低于弹窗、高于页面 -->
+  <div ref="petLayer" class="comax-pet-layer" aria-hidden="true" />
+  <Transition name="comax-toast">
+    <p v-if="toast" class="comax-plugin-toast" role="status">{{ toast }}</p>
+  </Transition>
 </template>
 
 <style>
@@ -54,4 +103,23 @@ watch(() => config.allAnimationsOff, (off) => {
 [data-all-animations-off] .page-forward-leave-to,
 [data-all-animations-off] .page-back-enter-from,
 [data-all-animations-off] .page-back-leave-to{transform:none}
+
+/* ── 插件宿主的基础样式（插件自己的样式由它自己负责）── */
+.comax-pet-layer{position:fixed;inset:0;z-index:60;pointer-events:none}
+.comax-pet-layer .comax-pet{
+  position:fixed;right:14px;bottom:calc(var(--safe-bottom, 0px) + 96px);
+  display:grid;place-items:center;pointer-events:auto;cursor:grab;
+  filter:drop-shadow(0 4px 10px rgba(0,0,0,.18));
+  animation:comax-pet-bob 3.2s ease-in-out infinite;
+  user-select:none;-webkit-user-select:none;touch-action:none;
+}
+@keyframes comax-pet-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(calc(-1 * var(--bob, 5px)))}}
+.comax-plugin-toast{
+  position:fixed;left:50%;bottom:calc(var(--safe-bottom, 0px) + 120px);z-index:80;
+  transform:translateX(-50%);margin:0;padding:8px 14px;border-radius:999px;
+  background:rgba(24,24,27,.9);color:#fff;font-size:12.5px;line-height:1.4;
+  max-width:80vw;overflow-wrap:anywhere;
+}
+.comax-toast-enter-active,.comax-toast-leave-active{transition:opacity .2s ease,transform .2s ease}
+.comax-toast-enter-from,.comax-toast-leave-to{opacity:0;transform:translate(-50%,8px)}
 </style>

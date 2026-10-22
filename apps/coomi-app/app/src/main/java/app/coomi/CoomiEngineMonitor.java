@@ -34,7 +34,14 @@ public class CoomiEngineMonitor extends Service {
 
     private static final String LOG_TAG = "CoomiEngineMonitor";
     private static final int NOTIFICATION_ID = CoomiConstants.NOTIFICATION_ID;
-    private static final int MONITOR_INTERVAL_MS = 30000; // 30s
+    /**
+     * 轮询间隔。
+     *
+     * 1.5.4 第 2 项把「重启引擎」交给软件自己拉起，所以这个间隔就是引擎挂掉到
+     * 被拉起的最大延迟。30 秒在手机上太长了（用户已经点进对话页却还在等引擎），
+     * 15 秒是本地 HTTP 探活的成本与体感的平衡点：一次 GET 只有几百字节。
+     */
+    private static final int MONITOR_INTERVAL_MS = 15000;
     private static final int RESTART_DELAY_MS = 5000;
     private static final int MAX_RESTART_ATTEMPTS = 5;
     private static final long WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L;
@@ -57,6 +64,39 @@ public class CoomiEngineMonitor extends Service {
     private static volatile String sTaskStatus = null;
     /** 当前运行中的 Monitor 实例（静态持有，供任务状态回调即时刷新通知）。 */
     private static volatile CoomiEngineMonitor sInstance = null;
+
+    /**
+     * 应用界面是否在前台。
+     *
+     * 用户 1.5.4 第 2 项的现场：没打开 App、也没给自启动权限，引擎却在后台被拉起。
+     * 根因就是这个服务自己重启自己（START_STICKY + 监控循环里"发现 stopped 就拉"）。
+     * 现在起一条硬规则：**界面不在前台且用户没开自启动时，一律不主动拉起引擎**，
+     * 服务自己也退出，等用户下次打开 App 再拉。
+     */
+    private static volatile boolean sAppVisible = false;
+
+    public static void setAppVisible(boolean visible) {
+        sAppVisible = visible;
+        if (!visible) return;
+        // 回到前台时立刻做一次探活，不必等下一个轮询周期。
+        CoomiEngineMonitor instance = sInstance;
+        if (instance != null) instance.mHandler.post(instance::checkAndRestartEngine);
+    }
+
+    /** 用户是否在引导页授予过「自启动」（没有权限时读不到，默认当作未授予）。 */
+    static boolean isAutostartEnabled(Context context) {
+        try {
+            return context.getSharedPreferences("coomi_launcher", Context.MODE_PRIVATE)
+                .getBoolean("autostart_enabled", false);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /** 是否可以在这个时机主动拉起引擎。 */
+    private boolean canPullEngineUp() {
+        return sAppVisible || isAutostartEnabled(this);
+    }
 
     /** 前端任务状态回调：更新常驻通知的「任务执行中/已完成」文案。 */
     public static void setTaskStatus(String status) {
@@ -135,9 +175,17 @@ public class CoomiEngineMonitor extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Logger.logInfo(LOG_TAG, "Monitor started");
+        // 系统把我们拉起来（进程被杀后 START_STICKY 重投，intent 为 null）时，
+        // 如果界面不在前台、用户也没开自启动，就直接退出 —— 这正是"后台偷偷起引擎"。
+        if (intent == null && !canPullEngineUp()) {
+            Logger.logInfo(LOG_TAG, "Restarted by system while backgrounded; stopping without starting engine");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         Notification notification = buildNotification("Comax 引擎运行中");
         startForeground(NOTIFICATION_ID, notification);
-        return START_STICKY;
+        // 不再让系统无条件复活：引擎要不要活着由「界面在前台 / 用户开了自启动」决定。
+        return START_NOT_STICKY;
     }
 
     @Override
@@ -230,6 +278,14 @@ public class CoomiEngineMonitor extends Service {
                 restartEngine();
             } else if ("stopped".equals(status)) {
                 mUnhealthyChecks = 0;
+                if (!canPullEngineUp()) {
+                    // 用户没打开 App、也没给自启动：这是"离开"而不是"崩溃"。
+                    // 不拉起引擎，顺手让监控服务退出，别在后台占着通知和唤醒。
+                    Logger.logInfo(LOG_TAG, "Engine stopped while backgrounded; leaving it stopped");
+                    stopMonitoring();
+                    stopSelf();
+                    return;
+                }
                 Logger.logInfo(LOG_TAG, "Engine not running, restarting...");
                 updateStatus("重启中…");
                 restartEngine();

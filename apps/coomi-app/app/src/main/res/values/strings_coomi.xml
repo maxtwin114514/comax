@@ -291,4 +291,22 @@
     <string name="coomi_user_agreement_body">使用 Comax 即表示您授权其按您的指令在本机执行操作。请审慎确认高风险操作并遵守适用法律。软件按现状提供，重要数据请自行备份。</string>
     <string name="coomi_privacy_policy_title">用户隐私政策</string>
     <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求与您主动使用的语音转写会发送给所配置的服务商。应用不再上报版本日活；错误反馈仅在您确认后上传脱敏诊断。</string>
+
+    <!-- 报错日志（1.5.4 第 12 项） -->
+    <string name="coomi_dash_error_log">报错日志</string>
+    <string name="coomi_dash_error_log_desc">引擎起不来时也能看原因，可改日志路径</string>
+    <string name="coomi_log_title">报错日志</string>
+    <string name="coomi_log_back">返回</string>
+    <string name="coomi_log_refresh">刷新</string>
+    <string name="coomi_log_intro">这个页面不依赖引擎：引擎没起来时正好用它看原因。下面可以选择日志来源、修改引擎日志的存放位置，或者把整段内容复制/分享出去。</string>
+    <string name="coomi_log_path_title">引擎日志位置</string>
+    <string name="coomi_log_path_hint">例如 /sdcard/Download/coomi.log</string>
+    <string name="coomi_log_save_path">保存路径</string>
+    <string name="coomi_log_reset_path">恢复默认</string>
+    <string name="coomi_log_sources">日志来源</string>
+    <string name="coomi_log_source_engine">引擎日志</string>
+    <string name="coomi_log_source_crash">崩溃日志</string>
+    <string name="coomi_log_source_logcat">系统日志</string>
+    <string name="coomi_log_copy">复制全部</string>
+    <string name="coomi_log_share">分享</string>
 </resources>

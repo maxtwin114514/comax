@@ -6,7 +6,12 @@
  * ⊕ 展开指令面板：Android SAF 文件导入 + 可滚动的斜杠指令列表。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { PERMISSION_MODES, REASONING_EFFORTS, useConfigStore } from '@/stores/config'
+import {
+  DEFAULT_THINKING_EFFORTS,
+  PERMISSION_MODES,
+  REASONING_EFFORT_LABELS,
+  useConfigStore,
+} from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useRouter } from 'vue-router'
 import { pushTrace, setControlModeActive } from '@/bridge/controlFloat'
@@ -14,6 +19,7 @@ import { MorphIcon } from 'morphicons/vue'
 import { gsap, prefersReducedMotion } from '@/composables/useGsap'
 import { Menu, ChevronUp, Plus, X } from 'lucide'
 import CoomiIcon from './CoomiIcon.vue'
+import PluginSlot from './PluginSlot.vue'
 
 const session = useSessionStore()
 const config = useConfigStore()
@@ -130,7 +136,7 @@ const EMERGE_MS = 340
  * 中间不再空等。留成常量而不是删掉，是因为停顿曾经是需求的一部分，
  * 将来要改回去只动这一个数字。
  */
-const STACK_PAUSE_MS = 0
+const STACK_PAUSE_MS = 140
 /** 阶段三：单张卡摊开的时长与相邻两张的错开间隔。 */
 const CARD_MS = 260
 const CARD_STAGGER_MS = 55
@@ -345,6 +351,62 @@ onBeforeUnmount(() => {
 })
 
 const modeLabel = computed(() => PERMISSION_MODES.find(m => m.mode === config.permissionMode)?.label ?? '')
+
+// ── 推理强度（1.5.4 第 13 项）────────────────────────────────────────────
+/** 强度弹层开关；点外部关闭。 */
+const effortOpen = ref(false)
+const effortToggleEl = ref<HTMLElement | null>(null)
+
+/**
+ * 当前模型声明的可用强度。
+ *
+ * 来源只有一处：模型的 `modelParameters[model].thinkingEfforts`，由
+ * 「保存模型」时调用引擎的探测接口写入。没有声明时才退回兜底的 低/中 ——
+ * 不再默认摆出「高 / 超高」，因为那两家不一定认。
+ */
+const declaredEfforts = computed<string[]>(() => {
+  const provider = config.providers.find(item => item.id === config.currentProviderId)
+  const list = provider?.modelParameters?.[config.currentModel]?.thinkingEfforts
+  if (Array.isArray(list) && list.length > 0) return list
+  return DEFAULT_THINKING_EFFORTS
+})
+
+const effortOptions = computed(() => {
+  const seen = new Set<string>()
+  const options: { value: string; label: string }[] = []
+  for (const value of ['off', 'auto', ...declaredEfforts.value]) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    options.push({ value, label: REASONING_EFFORT_LABELS[value] ?? value })
+  }
+  return options
+})
+
+const effortLabel = computed(() => REASONING_EFFORT_LABELS[config.reasoningEffort] ?? config.reasoningEffort)
+const effortNote = computed(() => (
+  config.reasoningEffort === 'off'
+    ? '关闭 = 纯聊天：不思考、不给工具、只保留人格提示词'
+    : '这些档位来自当前模型的实测/声明；换模型会自动收敛到它支持的档位'
+))
+
+function toggleEffort() {
+  effortOpen.value = !effortOpen.value
+  if (effortOpen.value) quickOpen.value = false
+}
+
+function pickEffort(effort: string) {
+  session.setReasoningEffort(effort as any)
+  effortOpen.value = false
+}
+
+// 换模型时如果当前档位不在新模型的清单里，收敛到「自动」，
+// 避免用户看着「高」实际被上游 400 拒掉。
+// immediate：旧版本可能把 'high' / 'xhigh' 存进了 localStorage，进来先收敛一次，
+// 免得界面显示一个当前模型并不支持的档位。
+watch([declaredEfforts, () => config.reasoningEffort], () => {
+  const allowed = new Set(effortOptions.value.map(item => item.value))
+  if (!allowed.has(config.reasoningEffort)) session.setReasoningEffort('auto')
+}, { immediate: true })
 const providerReady = computed(() => config.providers.some(provider => (
   provider.id === config.activeId
   && provider.models.length > 0
@@ -687,8 +749,6 @@ watch(text, () => {
     </div>
     <div v-if="quickOpen || session.lifeStatsOpen" class="quick-scrim" @click="quickOpen = false; session.lifeStatsOpen = false" />
     <div v-if="quickOpen" class="quick">
-      <p class="qhead reasoning-head">推理强度</p>
-      <div class="reasoning-options"><button v-for="item in REASONING_EFFORTS" :key="item.value" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">{{ item.label }}</button></div>
       <p class="qhead">本地能力</p>
       <div class="local-actions">
         <button class="qchip file" @click="insertSlash('/local_model ')"><CoomiIcon name="sparkle" :size="15" />本地模型</button>
@@ -739,7 +799,7 @@ watch(text, () => {
             <path class="wave-baseline" d="M0 50H320" />
           </svg>
         </div>
-        <div class="life-stats-grid"><span>当前模式<strong>数字生命</strong></span><span>推理档位<strong>{{ REASONING_EFFORTS.find(i => i.value === config.reasoningEffort)?.label }}</strong></span><span>会话状态<strong>{{ session.isBusy ? '运行中' : '待命' }}</strong></span><span>动态流<strong>已连接</strong></span></div>
+        <div class="life-stats-grid"><span>当前模式<strong>数字生命</strong></span><span>推理档位<strong>{{ effortLabel }}</strong></span><span>会话状态<strong>{{ session.isBusy ? '运行中' : '待命' }}</strong></span><span>动态流<strong>已连接</strong></span></div>
       </div>
       <div class="input-clip">
         <div v-if="importedFiles.length" class="attachments" aria-label="已导入文件">
@@ -783,6 +843,25 @@ watch(text, () => {
 
           <span class="spacer" />
 
+          <!-- 插件插槽：输入框左侧（manifest.slots 里声明 composer 才会出现） -->
+          <PluginSlot name="composer" />
+
+          <!--
+            推理强度（1.5.4 第 13 项）：从「+」面板里搬到「+」的左边。
+            点开只显示当前模型**声明可用**的档位 + 关闭 / 自动，
+            关闭 = 纯聊天（不思考、不给工具、只保留人格）。
+          -->
+          <button
+            ref="effortToggleEl"
+            class="act effort-chip"
+            :class="{ on: config.reasoningEffort !== 'auto', off: config.reasoningEffort === 'off' }"
+            :aria-expanded="effortOpen"
+            aria-label="推理强度"
+            @click="toggleEffort"
+          >
+            <span>{{ effortLabel }}</span>
+          </button>
+
           <button class="act" aria-label="快捷指令" @click="toggleQuick">
             <MorphIcon
               :icon="quickIcon"
@@ -805,6 +884,17 @@ watch(text, () => {
             <CoomiIcon v-else-if="isJumpIn" name="subtask" :size="18" />
             <CoomiIcon v-else name="arrowUp" :size="18" />
           </button>
+        </div>
+        <div v-if="effortOpen" class="effort-scrim" @click="effortOpen = false" />
+        <div v-if="effortOpen" class="effort-pop" role="group" aria-label="推理强度选项">
+          <button
+            v-for="item in effortOptions"
+            :key="item.value"
+            class="effort-item"
+            :class="{ selected: config.reasoningEffort === item.value }"
+            @click="pickEffort(item.value)"
+          >{{ item.label }}<small v-if="item.value === 'off'">纯聊天</small></button>
+          <p class="effort-note">{{ effortNote }}</p>
         </div>
           <div
             v-if="panelMounted"
@@ -1118,6 +1208,40 @@ watch(text, () => {
 .bar-toggle { flex-shrink: 0; }
 .bar-toggle.on { color: var(--blue); background: var(--blue-soft); }
 .production-pill.on { color: #ff3b30; background: rgba(255, 59, 48, 0.12); }
+
+/* 强度按钮：贴在「+」左边，宽度随文字走，不抢发送键的位置 */
+.effort-chip {
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.effort-chip.on { color: var(--blue); background: var(--blue-soft); }
+.effort-chip.off { color: var(--text-3); background: var(--fill); }
+.effort-scrim { position: fixed; inset: 0; z-index: 3; border: 0; background: transparent; }
+.effort-pop {
+  position: absolute; z-index: 4; right: 46px; bottom: calc(100% - 2px);
+  display: flex; flex-wrap: wrap; gap: 6px; max-width: min(76vw, 300px);
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--r-card);
+  background: var(--bg); box-shadow: var(--shadow-2);
+  animation: coomi-cascade .16s ease both;
+}
+.effort-item {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  min-height: 30px; padding: 0 11px; border-radius: 999px;
+  background: var(--fill); color: var(--text-2); font-size: 12px; font-weight: 600;
+}
+.effort-item small { color: var(--text-3); font-size: 9.5px; font-weight: 500; }
+.effort-item.selected { background: var(--blue-soft); color: var(--blue); }
+.effort-note {
+  flex: 1 0 100%; margin: 2px 0 0; color: var(--text-3);
+  font-size: 10.5px; line-height: 1.45;
+}
 
 .act {
   /* 用自然尺寸而不是固定像素：系统开启大字模式时，图标与按钮随之缩放，不会错位。 */
