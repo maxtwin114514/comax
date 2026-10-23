@@ -18,7 +18,8 @@ import { goBack } from '@/bridge/navigation'
 import { pluginErrors } from '@/plugins/host'
 import {
   conflicts, enabledCount, lastError, loading, overview, plugins, pluginsDir,
-  refresh, savePrompt, setEnabled, togglingId,
+  importZip, importing, importedId, importedUpgraded,
+  refresh, removePlugin, savePrompt, setEnabled, togglingId,
 } from '@/stores/plugins'
 
 const router = useRouter()
@@ -57,15 +58,34 @@ async function submitPrompt(id: string) {
 }
 
 const enabledText = computed(() => `${enabledCount.value} 个已启用`)
+/** 等待确认删除的插件 id；空字符串 = 不在删除流程里。 */
+const confirmRemove = ref('')
 
 onMounted(refresh)
 </script>
 
 <template>
   <div class="page">
-    <PageHead title="插件" @back="goBack(router, 'settings')" />
+    <PageHead title="插件" @back="goBack(router, 'dashboard')" />
     <main class="body">
       <p v-if="lastError" class="notice error">{{ lastError }}</p>
+
+      <!-- 主入口：装一个插件（Harness 风格）—— 选一个 .zip 就装上 -->
+      <section class="card install">
+        <p class="install-title">安装插件</p>
+        <p class="lead">
+          选一个 <code>.zip</code>：里面要有一个 <code>manifest.json</code>
+          （放在压缩包根目录，或唯一的一级子目录里），其余文件会原样装进插件目录。
+          同一个 id 已存在时等价于升级，开关与提示词配置保留。
+        </p>
+        <button class="btn primary wide" :disabled="importing" @click="importZip">
+          <CoomiIcon name="folder" :size="15" />{{ importing ? '正在导入…' : '导入插件（.zip）' }}
+        </button>
+        <p v-if="importedId" class="notice ok">
+          已导入「{{ importedId }}」{{ importedUpgraded ? '（覆盖安装了已有插件）' : '' }}，
+          到下面的列表里打开开关即可生效。
+        </p>
+      </section>
 
       <section class="card intro">
         <p class="lead">
@@ -214,11 +234,32 @@ comax.toast('插件已就绪')</pre>
           </p>
         </div>
       </section>
+
+      <!-- 删除确认：这是真删，不是停用 -->
+      <div v-if="confirmRemove" class="confirm-mask" @click.self="confirmRemove = ''">
+        <div class="confirm-card">
+          <p class="confirm-title">删除插件「{{ confirmRemove }}」？</p>
+          <p class="confirm-text">整个目录会被删除，开关与提示词配置也会清掉。这个操作不能撤销。</p>
+          <div class="row-actions">
+            <button class="btn ghost" @click="confirmRemove = ''">取消</button>
+            <button class="btn danger" @click="removePlugin(confirmRemove); confirmRemove = ''">删除</button>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
 
 <style scoped>
+.install { border: 1px solid var(--blue); background: linear-gradient(180deg, var(--blue-soft) 0%, var(--bg) 100%); }
+.install-title { margin: 0; color: var(--text); font-size: 14px; font-weight: 700; }
+.btn.primary.wide { width: 100%; justify-content: center; }
+.link.danger { color: var(--danger); }
+.confirm-mask { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.4); }
+.confirm-card { width: min(84vw, 320px); padding: 16px; border-radius: var(--r-card); background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
+.confirm-title { margin: 0; color: var(--text); font-size: 14px; font-weight: 700; }
+.confirm-text { margin: 0; color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+.btn.danger { background: var(--danger-soft); color: var(--danger); }
 .page { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--page); }
 .body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px calc(var(--safe-bottom) + 24px); display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .body > * { flex: 0 0 auto; }
@@ -232,10 +273,12 @@ comax.toast('插件已就绪')</pre>
 .count { color: var(--text-3); font-size: 11.5px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border: 0; border-radius: 10px; font-size: 12.5px; font-weight: 600; }
 .btn.ghost { background: var(--fill); color: var(--text-2); }
+.btn.primary { background: var(--blue); color: #fff; }
 .btn:disabled { opacity: .55; }
 .notice { margin: 0; padding: 9px 11px; border-radius: var(--r-md); font-size: 12.2px; line-height: 1.55; overflow-wrap: anywhere; }
 .notice.error { background: var(--danger-soft); color: var(--danger); }
 .notice.warn { background: var(--fill); color: var(--orange); }
+.notice.ok { background: var(--blue-soft); color: var(--blue); }
 .list { display: flex; flex-direction: column; gap: 9px; }
 .plugin { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--bg); padding: 11px 12px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .plugin.off { opacity: .78; }

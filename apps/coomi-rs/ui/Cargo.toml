@@ -42,6 +42,7 @@ tower-http.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 croner = "2"
+zip.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

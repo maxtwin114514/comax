@@ -179,6 +179,45 @@ async function loadScript() {
   }
 }
 
+/**
+ * 自动部署：让引擎用 SSH 把脚本推上服务器并执行一次。
+ *
+ * 为什么要先保存：部署用的是**服务器上那份配置**（IP / 用户名 / 密码 / 端口），
+ * 不先落盘就会出现「界面填了但部署用旧值」这种最难查的问题。
+ *
+ * 日志整段显示出来而不是只报成败：首次部署最常见的失败是安全组没放行端口、
+ * node 没装、nginx 路径不同，这些都在远端输出里写得很清楚，用户自己能看懂。
+ */
+const deploying = ref(false)
+const deployLog = ref('')
+const deployOk = ref<boolean | null>(null)
+async function autoDeploy() {
+  if (!host.value.trim() || !user.value.trim()) {
+    error.value = '请先填写公网 IP 与 SSH 用户名'
+    return
+  }
+  deploying.value = true
+  deployOk.value = null
+  deployLog.value = ''
+  error.value = ''
+  notice.value = ''
+  try {
+    // 先把当前输入落盘，保证部署用的就是屏幕上这份配置。
+    await save()
+    const result = await apiSend<{ ok: boolean; log: string }>('/api/cloud-access/deploy', 'POST', {})
+    deployOk.value = result.ok
+    deployLog.value = result.log || '（远端没有输出）'
+    notice.value = result.ok
+      ? '部署完成。现在回到上面点「连接」建立隧道。'
+      : '部署过程中有步骤失败，看下面的输出定位原因。'
+  } catch (cause) {
+    deployOk.value = false
+    error.value = `自动部署失败：${String(cause)}`
+  } finally {
+    deploying.value = false
+  }
+}
+
 async function copy(text: string, what: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -257,7 +296,25 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
       </section>
 
       <section class="card card-script">
-        <p class="qhead">部署脚本（在服务器上跑一次）</p>
+        <p class="qhead">服务器部署</p>
+        <!-- 主路径是一键自动部署：生成脚本 → SSH 上传 → root 执行，一次做完 -->
+        <div class="deploy-box">
+          <button class="btn primary wide" :disabled="deploying || !host.trim() || !user.trim()" @click="autoDeploy">
+            <CoomiIcon name="plug" :size="15" />{{ deploying ? '正在部署…' : '自动部署到服务器' }}
+          </button>
+          <p class="hint">
+            用上面填的 IP / 用户名 / 密码通过 SSH 登录，把脚本上传到 <code>/tmp</code> 并以 root 执行一次。
+            密码通过临时文件传递，不写进命令行；跑完即删临时文件。
+          </p>
+        </div>
+        <template v-if="deployLog">
+          <p class="deploy-result" :class="deployOk ? 'ok' : 'bad'">
+            {{ deployOk ? '✓ 部署成功' : '✗ 部署失败（看下面的输出）' }}
+          </p>
+          <pre class="script">{{ deployLog }}</pre>
+        </template>
+
+        <p class="qhead">或者手动在服务器上跑</p>
         <p class="hint">
           脚本会用 root 做四件事：把中继程序装到 /opt/comax-cloud、注册成 systemd 服务、
           新增一个 nginx vhost（含 WebSocket 升级）、重载 nginx。
@@ -375,4 +432,9 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 .input-hint { font-size: 11px; color: var(--text-3); margin-top: -2px; }
 .link-btn { padding: 0; border: 0; background: none; color: var(--blue); font-size: 11px; text-decoration: underline; }
 .card-script { background: linear-gradient(180deg, var(--bg) 0%, var(--fill) 100%); }
+.deploy-box { display: flex; flex-direction: column; gap: 7px; }
+.deploy-box .btn.wide { width: 100%; justify-content: center; }
+.deploy-result { margin: 0; font-size: 12.5px; font-weight: 650; }
+.deploy-result.ok { color: var(--ok); }
+.deploy-result.bad { color: var(--danger); }
 </style>

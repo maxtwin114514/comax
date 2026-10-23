@@ -225,10 +225,17 @@ const long = computed(() => output.value.length > 700 || output.value.split('\n'
 function toggle() { if (hasBody.value) manual.value = !open.value }
 
 /**
- * 展开 / 收起用 GSAP 做一次高度补间。
+ * 展开 / 收起：对**真实高度**做补间（0 ↔ 内容高度），最后落到 auto。
  *
- * 只动 height 到 auto 并配合透明度：内容长度不可预知，纯 CSS transition 无法从 0
- * 过渡到 auto，而这一步的瞬时重排只发生在用户点开的瞬间（不是每帧），代价可以接受。
+ * 为什么不能用 scaleY（1.5.4o2 修的就是这个）：scaleY 只改合成层里的绘制比例，
+ * 元素在布局里占的高度自始至终没变 —— 于是工具卡自己"长大"，但它下面的
+ * 消息、下一个工具卡纹丝不动，动画播完才「啪」地跳一下。用户原话是
+ * 「展开过程其他的内容一起动」，那必须是布局高度在变。
+ *
+ * 所以这里走标准做法：先量出 scrollHeight，从 0 补到那个值，补完清成 auto。
+ * 每帧一次重排只发生在用户点开的这 0.26 秒里（不是流式输出期间），代价可以接受；
+ * 换来的是下方内容跟着被推下去，和其它折叠面板的手感一致。
+ *
  * 关闭动画时直接切换显示，不做多余计算。
  */
 watch(open, (value, previous) => {
@@ -238,35 +245,40 @@ watch(open, (value, previous) => {
   // 让用户在「要动效 / 不要动效」上只有一个总开关。
   if (prefersReducedMotion() || !config.sendMorphAnimation || config.allAnimationsOff) {
     gsap.killTweensOf(element)
-    gsap.set(element, { clearProps: 'transform,opacity,transformOrigin' })
+    gsap.set(element, { clearProps: 'height,overflow,transform,opacity,transformOrigin' })
     collapsing.value = false
     return
   }
   gsap.killTweensOf(element)
   if (value) {
     collapsing.value = false
-    // 展开：用 scaleY 替代 height 动画 —— 不触发重排，GPU 合成，
-    // Android WebView 里长列表工具卡展开不再整屏闪。
+    // 展开：v-show 已把元素显示出来（display 恢复），这里从 0 补到实测高度。
     nextTick(() => requestAnimationFrame(() => {
       if (!open.value || config.allAnimationsOff || prefersReducedMotion()) return
+      // 先清掉可能残留的内联高度，量到真实内容高度再开始。
+      gsap.set(element, { height: 'auto', overflow: 'hidden' })
+      const target = element.scrollHeight
       gsap.fromTo(element,
-        { scaleY: 0.05, opacity: 0, transformOrigin: 'top center' },
+        { height: 0 },
         {
-          scaleY: 1, opacity: 1,
-          duration: 0.28, ease: 'power3.out',
-          onComplete: () => { gsap.set(element, { clearProps: 'scaleY,opacity,transformOrigin' }) },
+          height: target,
+          duration: 0.26, ease: 'power3.out',
+          // 补完立刻把高度交回 CSS（auto），否则内容后续变高（结果流式追加）会被截断。
+          onComplete: () => { gsap.set(element, { height: 'auto', clearProps: 'height,overflow' }) },
         })
     }))
   } else {
     // 收起：先播动画再允许 v-show 隐藏（collapsing 标志保持元素可见）。
     collapsing.value = true
+    gsap.set(element, { height: 'auto', overflow: 'hidden' })
+    const from = element.scrollHeight
     gsap.fromTo(element,
-      { scaleY: 1, opacity: 1, transformOrigin: 'top center' },
+      { height: from },
       {
-        scaleY: 0.05, opacity: 0,
-        duration: 0.22, ease: 'power3.in',
+        height: 0,
+        duration: 0.2, ease: 'power3.in',
         onComplete: () => {
-          gsap.set(element, { clearProps: 'scaleY,opacity,transformOrigin' })
+          gsap.set(element, { clearProps: 'height,overflow' })
           collapsing.value = false
         },
       })
@@ -276,7 +288,7 @@ watch(open, (value, previous) => {
 watch(() => config.allAnimationsOff, (off) => {
   if (!off || !bodyRef.value) return
   gsap.killTweensOf(bodyRef.value)
-  gsap.set(bodyRef.value, { clearProps: 'transform,opacity,transformOrigin' })
+  gsap.set(bodyRef.value, { clearProps: 'height,overflow,transform,opacity,transformOrigin' })
   collapsing.value = false
 })
 

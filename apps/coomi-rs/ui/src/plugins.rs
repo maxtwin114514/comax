@@ -369,6 +369,150 @@ pub fn read_asset(home: &Path, id: &str, relative: &str) -> Option<(Vec<u8>, &'s
     Some((bytes, mime_for(&target)))
 }
 
+/// 删除一个插件（整个目录 + 配置里的开关/动态提示词）。
+///
+/// 这是真正的删除，不是"停用"：目录直接删掉。用户想要保留就先在界面上关开关。
+/// 返回删除的目录是否存在过（用于区分「本来就不在」与「真的删掉了」）。
+pub fn remove_plugin(home: &Path, id: &str) -> Result<bool> {
+    let dir = plugins_dir(home).join(id);
+    let existed = dir.is_dir();
+    if existed {
+        fs::remove_dir_all(&dir)?;
+    }
+    let mut state = load_state(home);
+    state.enabled.remove(id);
+    state.prompts.remove(id);
+    save_state(home, &state)?;
+    Ok(existed)
+}
+
+/// 从 zip 字节流导入一个插件。
+///
+/// 结构约定（宽松，兼容 Harness 风格打包）：
+///   · 优先找 zip 根目录的 `manifest.json`；
+///   · 找不到就找唯一一个含 `manifest.json` 的一级子目录（`my-plugin/manifest.json`）；
+///   · 整个 zip 是一个"插件目录"，照原样解到 `plugins/<id>/`（id 取自 manifest）。
+///
+/// 安全边界：
+///   · 单文件 ≤ 16MB，总文件数 ≤ 512，解压后总大小 ≤ 64MB；
+///   · 路径逐一校验：拒绝绝对路径、`..`、盘符，落在插件目录内的才写；
+///   · 同名插件已存在时**不覆盖**：先删旧目录再写（等价于「覆盖安装」），
+///     配置里的 enabled / prompt 保留，升级插件不用重新开开关。
+///
+/// 返回 (插件 id, 覆盖安装了已有插件?)。
+pub fn import_zip(home: &Path, bytes: &[u8]) -> Result<(String, bool)> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|error| anyhow::anyhow!("不是有效的 zip 文件：{error}"))?;
+
+    // 先过一遍清单，定位 manifest.json，并算总大小（防止 zip 炸弹）。
+    let mut manifest_path: Option<String> = None;
+    let mut total_uncompressed: u64 = 0;
+    let mut file_count: u64 = 0;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        let name = entry.name().to_owned();
+        total_uncompressed = total_uncompressed.saturating_add(entry.size());
+        if !entry.is_dir() {
+            file_count += 1;
+        }
+        if total_uncompressed > 64 * 1024 * 1024 {
+            anyhow::bail!("解压后总大小超过 64MB");
+        }
+        if file_count > 512 {
+            anyhow::bail!("文件数超过 512");
+        }
+        // 找 manifest：根目录优先，其次唯一的一级子目录。
+        let parts: Vec<&str> = name.split('/').filter(|part| !part.is_empty()).collect();
+        if *parts.last().unwrap_or(&"") == "manifest.json" {
+            if parts.len() == 1 {
+                manifest_path = Some(name.clone());
+            } else if parts.len() == 2 && manifest_path.is_none() {
+                manifest_path = Some(name.clone());
+            }
+        }
+    }
+    let Some(manifest_path) = manifest_path else {
+        anyhow::bail!("zip 里没有 manifest.json（插件根目录或唯一一级子目录内）");
+    };
+
+    // 读 manifest 拿 id。
+    let manifest_json = {
+        let mut entry = archive.by_name(&manifest_path)?;
+        let mut content = String::new();
+        entry.read_to_string(&mut content)?;
+        content
+    };
+    let manifest: PluginManifest = serde_json::from_str(&manifest_json)
+        .map_err(|error| anyhow::anyhow!("manifest.json 解析失败：{error}"))?;
+    let id = if manifest.id.trim().is_empty() {
+        // id 为空时用目录名，但必须是合法文件名片段。
+        let fallback = manifest_path
+            .split('/')
+            .next()
+            .filter(|name| manifest_path.contains('/'))
+            .unwrap_or("")
+            .to_owned();
+        if fallback.trim().is_empty() {
+            anyhow::bail!("manifest.id 为空，且无法从 zip 结构推断目录名");
+        }
+        fallback
+    } else {
+        manifest.id.trim().to_owned()
+    };
+    // id 只能落在插件目录内：绝不能有 / .. 之类的路径成分。
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") || id.starts_with('.') {
+        anyhow::bail!("manifest.id 不合法（{id}）：不能包含路径分隔符或 . 开头");
+    }
+
+    let target_dir = plugins_dir(home).join(&id);
+    let existed = target_dir.is_dir();
+    if existed {
+        fs::remove_dir_all(&target_dir)?;
+    }
+    fs::create_dir_all(&target_dir)?;
+
+    // 前缀：根级 manifest 时为空，子目录 manifest 时是整个子目录名。
+    let prefix = if manifest_path.contains('/') {
+        format!("{}/", manifest_path.split('/').next().unwrap_or(""))
+    } else {
+        String::new()
+    };
+
+    // 真正解包。
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let name = entry.name().to_owned();
+        if !prefix.is_empty() && !name.starts_with(&prefix) {
+            continue;
+        }
+        let relative = if prefix.is_empty() { name.as_str() } else { &name[prefix.len()..] };
+        if relative.is_empty() || entry.is_dir() {
+            continue;
+        }
+        // 路径安全（与 read_asset 同一套规则）：拒绝绝对路径、`..`、盘符。
+        let rel_path = Path::new(relative);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            anyhow::bail!("zip 内含不合法路径：{relative}");
+        }
+        if entry.size() > 16 * 1024 * 1024 {
+            anyhow::bail!("单个文件超过 16MB：{relative}");
+        }
+        let mut content = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut content)?;
+        let out = target_dir.join(relative);
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&out, content)?;
+    }
+    Ok((id, existed))
+}
+
 fn mime_for(path: &Path) -> &'static str {
     match path
         .extension()

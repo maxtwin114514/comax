@@ -104,3 +104,81 @@ export async function savePrompt(id: string, prompt: string) {
     lastError.value = String(error)
   }
 }
+
+/** 导入状态：进行中 / 刚导入的 id / 是否覆盖安装了已有插件。 */
+export const importing = ref(false)
+export const importedId = ref('')
+export const importedUpgraded = ref(false)
+
+/**
+ * 从手机选一个 .zip 导入成插件（Harness 风格的「装插件」）。
+ *
+ * 走的是 Android 的文件选择器（CoomiAndroid.importFiles），不是浏览器上传：
+ * 手机上用户找的是文件管理器里的 zip，不是"把文件再点一遍上传"。
+ * 导入成功后立刻重新扫描并挂载，不用重启引擎。
+ */
+export async function importZip() {
+  const bridge = (window as any).CoomiAndroid
+  if (!bridge || typeof bridge.importFiles !== 'function') {
+    lastError.value = '当前环境不支持选择文件（请在本机运行，不要走云端）'
+    return
+  }
+  importing.value = true
+  importedId.value = ''
+  importedUpgraded.value = false
+  lastError.value = ''
+  try {
+    const files = await new Promise<string[]>((resolve, reject) => {
+      const listener = (event: Event) => {
+        const detail = (event as CustomEvent<{ requestId: string; paths: string[] }>).detail
+        window.removeEventListener('coomi:file-imported', listener)
+        resolve(detail.paths)
+      }
+      window.addEventListener('coomi:file-imported', listener)
+      bridge.importFiles('plugin-import', 'application/zip', false)
+      setTimeout(() => reject(new Error('选择文件超时')), 120_000)
+    })
+    const path = files[0]
+    if (!path) throw new Error('没有选到文件')
+    if (!path.toLowerCase().endsWith('.zip')) throw new Error('只接受 .zip 文件')
+    // 读成 ArrayBuffer 再交给 multipart。手机上路径是真实文件，fetch 直接读。
+    const response = await fetch(`file://localhost${path}`)
+    const buffer = await response.arrayBuffer()
+    const form = new FormData()
+    form.append('file', new Blob([buffer], { type: 'application/zip' }), path.split('/').pop() ?? 'plugin.zip')
+    const result = await fetch('/api/plugins/import', { method: 'POST', body: form })
+    if (!result.ok) {
+      const text = await result.text()
+      throw new Error(text || `HTTP ${result.status}`)
+    }
+    const payload = await result.json()
+    importedId.value = payload.imported ?? ''
+    importedUpgraded.value = payload.upgraded === true
+    overview.value = payload
+    codeCache.clear()
+    await loadEnabledPlugins()
+  } catch (error) {
+    lastError.value = String(error)
+  } finally {
+    importing.value = false
+  }
+}
+
+/**
+ * 彻底删除一个插件（目录 + 开关/动态提示词配置）。
+ *
+ * 这是删除，不是停用。界面上必须让用户确认。
+ */
+export async function removePlugin(id: string) {
+  togglingId.value = id
+  lastError.value = ''
+  try {
+    overview.value = await apiSend<PluginOverview>(`/api/plugins/${encodeURIComponent(id)}`, 'DELETE')
+    codeCache.delete(id)
+    unloadPlugin(id)
+  } catch (error) {
+    lastError.value = String(error)
+  } finally {
+    togglingId.value = ''
+  }
+}

@@ -715,6 +715,19 @@
                 </LinearLayout>
                 <View style="@style/Coomi.Divider"/>
                 <!--
+                    插件（1.5.4o2 第 5 项）：入口从设置页挪到控制台，
+                    与「技能 / MCP」并列 —— 它们都是扩展，放在一起找得到。
+                -->
+                <LinearLayout android:id="@+id/btn_web_plugins" style="@style/Coomi.Row" android:clickable="true" android:focusable="true">
+                    <ImageView android:layout_width="@dimen/coomi_icon_m" android:layout_height="@dimen/coomi_icon_m" android:src="@drawable/coomi_ic_cube" android:tint="?attr/coomiText2" android:contentDescription="@null"/>
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="@dimen/coomi_space_m" android:orientation="vertical">
+                        <TextView style="@style/Coomi.Text.Body" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/coomi_dash_plugins"/>
+                        <TextView style="@style/Coomi.Text.Caption" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/coomi_dash_plugins_desc"/>
+                    </LinearLayout>
+                    <ImageView android:layout_width="@dimen/coomi_icon_s" android:layout_height="@dimen/coomi_icon_s" android:src="@drawable/coomi_ic_chevron_right" android:tint="?attr/coomiText3" android:contentDescription="@null"/>
+                </LinearLayout>
+                <View style="@style/Coomi.Divider"/>
+                <!--
                     报错日志（1.5.4 第 12 项）：入口在原生控制台，不经过 WebView，
                     所以引擎起不来时这一项照样能点开看原因。
                 -->

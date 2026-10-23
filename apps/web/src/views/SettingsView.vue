@@ -338,15 +338,6 @@ onMounted(async () => {
         </button>
       </div>
 
-      <p class="sec-label">扩展</p>
-      <div class="group">
-        <button class="row" @click="router.push('/plugins')">
-          <span class="ri"><CoomiIcon name="sparkle" :size="17" /></span>
-          <span class="rt"><span class="rmain">插件</span><span class="rsub">界面扩展、动效、桌宠、提示词注入（含接口文档）</span></span>
-          <CoomiIcon name="chevronRight" :size="15" class="arw" />
-        </button>
-      </div>
-
       <p class="sec-label">远程</p>
       <div class="group">
         <button class="row" @click="router.push('/cloud')">

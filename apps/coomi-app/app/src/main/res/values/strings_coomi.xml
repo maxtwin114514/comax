@@ -293,6 +293,8 @@
     <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求与您主动使用的语音转写会发送给所配置的服务商。应用不再上报版本日活；错误反馈仅在您确认后上传脱敏诊断。</string>
 
     <!-- 报错日志（1.5.4 第 12 项） -->
+    <string name="coomi_dash_plugins">插件</string>
+    <string name="coomi_dash_plugins_desc">导入 .zip 插件，改界面、加动效、放桌宠</string>
     <string name="coomi_dash_error_log">报错日志</string>
     <string name="coomi_dash_error_log_desc">引擎起不来时也能看原因，可改日志路径</string>
     <string name="coomi_log_title">报错日志</string>

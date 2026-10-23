@@ -1017,8 +1017,10 @@ pub async fn serve(
         )
         // ── 插件（1.5.4 第 11 项）────────────────────────────────────────
         .route("/api/plugins", get(list_plugins))
+        .route("/api/plugins/import", post(import_plugin))
         .route("/api/plugins/{id}/toggle", post(toggle_plugin))
         .route("/api/plugins/{id}/prompt", post(set_plugin_prompt))
+        .route("/api/plugins/{id}", delete(remove_plugin))
         .route("/api/plugins/{id}/asset/{*path}", get(plugin_asset))
         .route("/api/sessions", get(list_sessions))
         .route("/api/tasks", get(list_tasks))
@@ -1123,6 +1125,7 @@ pub async fn serve(
         )
         .route("/api/cloud-access/tunnel", post(cloud_tunnel_action))
         .route("/api/cloud-access/server-script", get(cloud_server_script))
+        .route("/api/cloud-access/deploy", post(cloud_auto_deploy))
         .route(
             "/api/dynamic-workflows",
             get(dynwork_list).post(dynwork_save),
@@ -5731,6 +5734,55 @@ async fn toggle_plugin(
         .ok_or_else(|| ApiError::bad_request("missing `enabled`"))?;
     crate::plugins::set_enabled(&state.home, &id, enabled).map_err(ApiError::from)?;
     Ok(Json(crate::plugins::overview(&state.home)))
+}
+
+/// 导入 zip 插件。
+///
+/// 这是与 Harness「装插件」对齐的动作：一次 multipart 上传，引擎解包、
+/// 校验 manifest、放进插件目录，返回最新的插件清单（含导入的那个）。
+/// 同一 id 已存在时覆盖（等价于升级）；manifest 解析失败 / 路径不合法直接 400。
+async fn import_plugin(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    let mut zip_bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("invalid multipart form: {error}")))?
+    {
+        if field.name() == Some("file") {
+            let bytes = field.bytes().await.map_err(|_| ApiError::bad_request("invalid zip payload"))?;
+            if bytes.is_empty() {
+                return Err(ApiError::bad_request("zip 文件为空"));
+            }
+            if bytes.len() > 32 * 1024 * 1024 {
+                return Err(ApiError::bad_request("zip 文件超过 32MB"));
+            }
+            zip_bytes = Some(bytes.to_vec());
+        }
+    }
+    let bytes = zip_bytes.ok_or_else(|| ApiError::bad_request("multipart 缺少 file 字段"))?;
+    let (id, upgraded) = crate::plugins::import_zip(&state.home, &bytes)
+        .map_err(|error| ApiError::bad_request(format!("导入失败：{error:#}")))?;
+    let mut overview = crate::plugins::overview(&state.home);
+    overview["imported"] = json!(id);
+    overview["upgraded"] = json!(upgraded);
+    Ok(Json(overview))
+}
+
+/// 彻底删除一个插件（目录 + 开关/动态提示词配置）。
+///
+/// 不是停用：目录会直接删掉。要「先保留再关闭」应该用 toggle。
+async fn remove_plugin(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let existed = crate::plugins::remove_plugin(&state.home, &id).map_err(ApiError::from)?;
+    let mut overview = crate::plugins::overview(&state.home);
+    overview["removed"] = json!(id);
+    overview["existed"] = json!(existed);
+    Ok(Json(overview))
 }
 
 async fn set_plugin_prompt(
@@ -10508,6 +10560,120 @@ async fn cloud_server_script(State(state): State<AppState>) -> Result<Json<Value
             crate::cloud::RELAY_SOURCE,
         ),
     })))
+}
+
+/// 自动部署：把生成好的脚本用 SSH 推到服务器并以 root 执行一次。
+///
+/// 用户要求「生成脚本后软件自动用 ssh 连接并部署」，所以这里把手工那三步
+/// （写文件 → 上传 → 执行）做成一次调用。
+///
+/// 实现细节与边界（必须如实写清楚）：
+///   · 依赖系统里的 `ssh` 与 `sshpass`。手机运行环境（Debian proot）自带这两个，
+///     真机上如果被裁剪掉会返回明确报错，而不是静默失败；
+///   · 密码通过 `sshpass -f <临时文件>` 传入，绝不写在命令行里（`ps` 能看到命令行）；
+///     临时文件写完立刻 0600，用完在 finally 里删除；
+///   · 首次连接会问 host key，这里用 `StrictHostKeyChecking=accept-new`
+///     —— 只接受"没见过的主机"，见过的改了 key 仍然会拒绝（比直接关校验安全）；
+///   · 脚本先落到远端 `/tmp`，`bash` 跑完就删；不在远端留下中间文件。
+async fn cloud_auto_deploy(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let settings = CloudSettings::load(&state.home);
+    if settings.host.trim().is_empty() {
+        return Err(ApiError::bad_request("请先填写公网 IP"));
+    }
+    if settings.user.trim().is_empty() {
+        return Err(ApiError::bad_request("请先填写 SSH 用户名"));
+    }
+    let password = CloudSettings::read_password(&state.home);
+    if password.is_empty() {
+        return Err(ApiError::bad_request("请先填写并保存密码"));
+    }
+    let script = crate::cloud::server_script(&settings, &state.token, crate::cloud::RELAY_SOURCE);
+    let host = settings.host.trim().to_owned();
+    let user = settings.user.trim().to_owned();
+
+    // 密码文件放在 .coomi 下，0600，跑完就删。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let password_file = state.home.join(format!(".cloud-deploy-{stamp}.pw"));
+    let script_file = state.home.join(format!(".cloud-deploy-{stamp}.sh"));
+    std::fs::write(&password_file, &password).map_err(|error| ApiError::internal(format!("写临时密码文件失败：{error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::write(&script_file, &script).map_err(|error| ApiError::internal(format!("写临时脚本失败：{error}")))?;
+
+    let result = run_ssh_deploy(&host, &user, &password_file, &script_file).await;
+    let _ = std::fs::remove_file(&password_file);
+    let _ = std::fs::remove_file(&script_file);
+    let (ok, log) = result?;
+    Ok(Json(json!({
+        "ok": ok,
+        "log": log,
+        "host": host,
+        "user": user,
+    })))
+}
+
+/// 真正跑 ssh / scp 的地方。返回 (是否成功, 合并后的输出)。
+async fn run_ssh_deploy(
+    host: &str,
+    user: &str,
+    password_file: &std::path::Path,
+    script_file: &std::path::Path,
+) -> Result<(bool, String), ApiError> {
+    let remote = format!("{user}@{host}");
+    let remote_script = format!("/tmp/comax-cloud-setup-{}.sh", std::process::id());
+    let base_args = [
+        "-o".to_owned(),
+        "StrictHostKeyChecking=accept-new".to_owned(),
+        "-o".to_owned(),
+        "ConnectTimeout=15".to_owned(),
+        "-o".to_owned(),
+        "NumberOfPasswordPrompts=1".to_owned(),
+    ];
+
+    // 1) 上传脚本
+    let mut scp = tokio::process::Command::new("sshpass");
+    scp.arg("-f").arg(password_file);
+    scp.arg("scp");
+    scp.args(&base_args);
+    scp.arg(script_file);
+    scp.arg(format!("{remote}:{remote_script}"));
+    scp.stdin(std::process::Stdio::null());
+    let scp_output = scp
+        .output()
+        .await
+        .map_err(|error| ApiError::internal(format!("无法执行 sshpass/scp：{error}（手机上缺少 ssh 客户端？）")))?;
+    let mut log = String::new();
+    log.push_str("== scp ==\n");
+    log.push_str(&String::from_utf8_lossy(&scp_output.stdout));
+    log.push_str(&String::from_utf8_lossy(&scp_output.stderr));
+    if !scp_output.status.success() {
+        return Ok((false, format!("{log}\n上传失败（退出码 {:?}）", scp_output.status.code())));
+    }
+
+    // 2) 远端执行 + 清理
+    let mut ssh = tokio::process::Command::new("sshpass");
+    ssh.arg("-f").arg(password_file);
+    ssh.arg("ssh");
+    ssh.args(&base_args);
+    ssh.arg(&remote);
+    ssh.arg(format!(
+        "sudo -n bash {remote_script} || bash {remote_script}; rm -f {remote_script}"
+    ));
+    ssh.stdin(std::process::Stdio::null());
+    let ssh_output = ssh
+        .output()
+        .await
+        .map_err(|error| ApiError::internal(format!("无法执行 sshpass/ssh：{error}（手机上缺少 ssh 客户端？）")))?;
+    log.push_str("\n== ssh ==\n");
+    log.push_str(&String::from_utf8_lossy(&ssh_output.stdout));
+    log.push_str(&String::from_utf8_lossy(&ssh_output.stderr));
+    Ok((ssh_output.status.success(), log))
 }
 
 #[cfg(test)]

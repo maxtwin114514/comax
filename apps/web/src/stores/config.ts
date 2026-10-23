@@ -75,6 +75,8 @@ export const BUILTIN_PROVIDER_PRESETS: ProviderPreset[] = [
 
 export interface ProviderInput {
   id: string; name: string; apiKey: string; apiKeys?: string[]; models: string[]
+  /** 显式指定当前选中模型；缺省时用 models[0]。 */
+  model?: string
   baseUrl?: string; type?: string; toolProtocol?: string; contextWindow?: number
   modelContextWindows?: Record<string, number>
   fastModel?: string | null; activate?: boolean; supportsWebSearch?: boolean; supportsVision?: boolean
@@ -158,15 +160,16 @@ export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
 ]
 
 /** 强度值 → 中文字面。模型声明里可能出现的每一种都要能显示。 */
+/**
+ * 强度值 → 显示字面。
+ *
+ * 1.5.4o2：用户要**直接显示英文**（max / high / …），只有 off / auto 保留中文。
+ * 其余的档位原样显示上游值，不翻中文 —— 英文就是服务端真正认的那个词，
+ * 翻译过来反而要用户再猜它对应的是哪档。
+ */
 export const REASONING_EFFORT_LABELS: Record<string, string> = {
-  off: '关闭',
-  auto: '自动',
-  minimal: '极简',
-  low: '低',
-  medium: '中',
-  high: '高',
-  xhigh: '超高',
-  max: '最高',
+  off: 'Off',
+  auto: 'Auto',
 }
 
 /**
@@ -579,6 +582,38 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   /** 新增/更新 Provider。空 apiKey 表示沿用旧 key（后端语义）。 */
+  /**
+   * 给某个模型追加/修改参数（1.5.4o2 用来写探测到的 thinkingEfforts）。
+   *
+   * 只动 `modelParameters[model]`，其它字段原样保留；保存走现有的 upsertProvider。
+   * 失败时静默：这是后台探测，不能因为一次保存失败打断用户输入。
+   */
+  async function patchModelParams(providerId: string, model: string, patch: Partial<ModelParameters>) {
+    const provider = providers.value.find(item => item.id === providerId)
+    if (!provider) return false
+    const modelParameters = { ...(provider.modelParameters ?? {}) }
+    modelParameters[model] = { ...(modelParameters[model] ?? {}), ...patch }
+    return upsertProvider({
+      id: provider.id,
+      name: provider.name,
+      apiKey: '',
+      models: provider.models,
+      model: provider.model,
+      baseUrl: provider.baseUrl ?? '',
+      type: provider.type,
+      toolProtocol: provider.toolProtocol,
+      contextWindow: provider.contextWindow,
+      modelContextWindows: provider.modelContextWindows,
+      fastModel: provider.fastModel ?? null,
+      supportsWebSearch: provider.supportsWebSearch,
+      supportsVision: provider.supportsVision,
+      modelDescriptions: provider.modelDescriptions,
+      modelParameters,
+      capabilityOverrides: provider.capabilityOverrides,
+      activate: false,
+    })
+  }
+
   async function upsertProvider(input: ProviderInput): Promise<boolean> {
     if (usingMock.value) {
       // 浏览器兜底：仅本地更新，不落盘
@@ -618,7 +653,7 @@ export const useConfigStore = defineStore('config', () => {
         apiKey: input.apiKey,
         apiKeys: input.apiKeys ?? [],
         models: input.models,
-        model: input.models[0],
+        model: input.model || input.models[0],
         baseUrl: input.baseUrl,
         type: input.type,
         toolProtocol: input.toolProtocol,
@@ -730,7 +765,7 @@ export const useConfigStore = defineStore('config', () => {
     currentProviderId, currentModel, currentProvider, mergedProviders,
     fetchProviders, selectModel, syncDisplayModel, validateAndSelectModel, setPermissionMode, syncStartupPermission, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, setDefaultPermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, setDigitalLifeEnabled, syncDigitalLifeEnabled, fetchCustomPrompt, saveCustomPrompt,
-    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels, fetchSubAgentSettings, saveSubAgentSettings,
+    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels, fetchSubAgentSettings, saveSubAgentSettings, patchModelParams,
   }
 })
 

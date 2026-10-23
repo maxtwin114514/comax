@@ -516,6 +516,14 @@ export const useSessionStore = defineStore('session', () => {
         consecutiveToolFailures = 0
         maxConsecutiveToolFailures = 0
         failureNoticeCreated = false
+        // 回复完成：强制触发一次置底刷新。
+        //
+        // 有概率"回复完就锁死在半空"：最后一段内容是工具卡，它在 turn_end 前后
+        // 还会变高（结果展开/耗时补齐）。DynamicScroller 重新测量行高时会写 scrollTop，
+        // 这个写入被 useAutoScroll 的 onScroll 当成了"用户在滚"，距离底部一超过 40px
+        // 就把 following 置 false —— 之后再也不跟随，用户看到的就是卡在半空。
+        // 这里递增 viewRevision，ChatView 的 watch 会无条件 following = true 并置底一次。
+        viewRevision.value += 1
         persistSoon()
         break
       case 'session_state': {

@@ -198,6 +198,8 @@ public class CoomiDashboardActivity extends Activity {
         // 报错日志走原生 Activity：它必须在引擎不可用时也能打开（1.5.4 第 12 项）。
         findViewById(R.id.btn_error_log).setOnClickListener(v ->
             startActivity(new Intent(this, CoomiLogActivity.class)));
+        // 插件页（1.5.4o2 第 5 项）：入口从设置页挪到控制台。
+        findViewById(R.id.btn_web_plugins).setOnClickListener(v -> openCoomiRoute("#/plugins"));
         mDonateButton.setOnClickListener(v -> showDonateDialog());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
         mStorageSettingsButton.setOnClickListener(v -> openStorageSettings());

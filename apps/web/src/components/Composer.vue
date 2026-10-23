@@ -15,6 +15,7 @@ import {
 import { useSessionStore } from '@/stores/session'
 import { useRouter } from 'vue-router'
 import { pushTrace, setControlModeActive } from '@/bridge/controlFloat'
+import { apiSend } from '@/bridge/http'
 import { MorphIcon } from 'morphicons/vue'
 import { gsap, prefersReducedMotion } from '@/composables/useGsap'
 import { Menu, ChevronUp, Plus, X } from 'lucide'
@@ -377,10 +378,59 @@ const effortOptions = computed(() => {
   for (const value of ['off', 'auto', ...declaredEfforts.value]) {
     if (seen.has(value)) continue
     seen.add(value)
+    // off/auto 显示中文；真实档位原样显示英文（就是上游认的那个词）。
     options.push({ value, label: REASONING_EFFORT_LABELS[value] ?? value })
   }
   return options
 })
+
+// 1.5.4o2：每次选择模型就自动探测可用强度（后台静默，不打扰输入）；
+// 已经在会话里探过的模型不会再探。本地缓存用「provider:model」做 key。
+const effortProbing = ref<Set<string>>(new Set())
+function effortCacheKey(): string {
+  return `${config.currentProviderId}:${config.currentModel}`
+}
+function effortCache(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem('coomi.effortCache') ?? '[]') as string[]) }
+  catch { return new Set() }
+}
+function markEffortCached(key: string) {
+  const cache = effortCache()
+  cache.add(key)
+  try { localStorage.setItem('coomi.effortCache', JSON.stringify([...cache])) } catch { /* 配额满就算了 */ }
+}
+async function ensureEffortsProbed() {
+  const providerId = config.currentProviderId
+  const model = config.currentModel
+  if (!providerId || !model) return
+  const key = `${providerId}:${model}`
+  if (effortCache().has(key) || effortProbing.value.has(key)) return
+  // 已经声明过 thinkingEfforts 的模型不必再探（可能是用户手动填的，或上次探测的结果）。
+  const provider = config.providers.find(item => item.id === providerId)
+  if (provider?.modelParameters?.[model]?.thinkingEfforts?.length) {
+    markEffortCached(key)
+    return
+  }
+  effortProbing.value = new Set([...effortProbing.value, key])
+  try {
+    const result = await apiSend<{ efforts: string[] }>(
+      `/api/providers/${encodeURIComponent(providerId)}/probe-reasoning`,
+      'POST',
+      { model },
+    )
+    if (Array.isArray(result.efforts) && result.efforts.length > 0) {
+      config.patchModelParams(providerId, model, { thinkingEfforts: result.efforts })
+    }
+    markEffortCached(key)
+  } catch {
+    // 探测失败不打扰用户：这个会话内不再重试，下次进来还会再探。
+  } finally {
+    effortProbing.value.delete(key)
+    effortProbing.value = new Set(effortProbing.value)
+  }
+}
+// 换模型 / 厂商变了就探一次（只探没探过的）。后台异步，不阻塞界面。
+watch([() => config.currentProviderId, () => config.currentModel], () => { void ensureEffortsProbed() }, { immediate: true })
 
 const effortLabel = computed(() => REASONING_EFFORT_LABELS[config.reasoningEffort] ?? config.reasoningEffort)
 const effortNote = computed(() => (
@@ -886,6 +936,7 @@ watch(text, () => {
           </button>
         </div>
         <div v-if="effortOpen" class="effort-scrim" @click="effortOpen = false" />
+        <!-- 竖排、无圆框、线隔开（1.5.4o2）：选项就是上游认的英文档名 -->
         <div v-if="effortOpen" class="effort-pop" role="group" aria-label="推理强度选项">
           <button
             v-for="item in effortOptions"
@@ -893,7 +944,10 @@ watch(text, () => {
             class="effort-item"
             :class="{ selected: config.reasoningEffort === item.value }"
             @click="pickEffort(item.value)"
-          >{{ item.label }}<small v-if="item.value === 'off'">纯聊天</small></button>
+          >
+            <span>{{ item.label }}</span>
+            <span v-if="item.value === 'off'" class="effort-tag">纯聊天</span>
+          </button>
           <p class="effort-note">{{ effortNote }}</p>
         </div>
           <div
@@ -1226,21 +1280,24 @@ watch(text, () => {
 .effort-scrim { position: fixed; inset: 0; z-index: 3; border: 0; background: transparent; }
 .effort-pop {
   position: absolute; z-index: 4; right: 46px; bottom: calc(100% - 2px);
-  display: flex; flex-wrap: wrap; gap: 6px; max-width: min(76vw, 300px);
-  padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--r-card);
+  display: flex; flex-direction: column; width: 170px;
+  padding: 0; border: 0; border-radius: 0;
   background: var(--bg); box-shadow: var(--shadow-2);
   animation: coomi-cascade .16s ease both;
 }
+/* 竖排 + 线隔开：整行就是一个条目，不再有圆框 */
 .effort-item {
-  display: inline-flex; align-items: baseline; gap: 4px;
-  min-height: 30px; padding: 0 11px; border-radius: 999px;
-  background: var(--fill); color: var(--text-2); font-size: 12px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px;
+  min-height: 36px; padding: 0 14px; border: 0; border-radius: 0;
+  background: none; color: var(--text-2); font-size: 13px; font-weight: 500;
+  text-align: left; letter-spacing: .02em;
 }
-.effort-item small { color: var(--text-3); font-size: 9.5px; font-weight: 500; }
-.effort-item.selected { background: var(--blue-soft); color: var(--blue); }
+.effort-item + .effort-item { border-top: 1px solid var(--border); }
+.effort-item.selected { color: var(--blue); }
+.effort-tag { margin-left: auto; color: var(--text-3); font-size: 10px; font-weight: 500; }
 .effort-note {
-  flex: 1 0 100%; margin: 2px 0 0; color: var(--text-3);
-  font-size: 10.5px; line-height: 1.45;
+  margin: 2px 0 0; padding: 7px 13px 3px; border-top: 1px solid var(--border);
+  color: var(--text-3); font-size: 10.5px; line-height: 1.45;
 }
 
 .act {
