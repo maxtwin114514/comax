@@ -849,7 +849,8 @@ function goDashboard() {
           <div class="grip" />
           <div class="stitle">配置 {{ installingMcp.name }}</div>
           <p class="sdesc">{{ installingMcp.description }}</p>
-          <label v-for="p in installingMcp.required_parameters" :key="p.key" class="field">
+          <!-- 同上：安装参数里"必填"的那些框也点不开，同因同修 -->
+          <div v-for="p in installingMcp.required_parameters" :key="p.key" class="field">
             <span>{{ p.label }}<em v-if="!p.secret" class="req">必填</em></span>
             <input
               v-model="installValues[p.key]"
@@ -857,7 +858,7 @@ function goDashboard() {
               :placeholder="p.key"
               autocomplete="off"
             />
-          </label>
+          </div>
           <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该 MCP 无需额外配置，直接安装即可。</p>
           <div class="sheet-actions">
             <button class="btn ghost" @click="closeInstallForm">取消</button>
@@ -876,50 +877,61 @@ function goDashboard() {
               <CoomiIcon name="plug" :size="17" />
               {{ editingMcpName ? `配置 MCP「${editingMcpName}」` : '新建自定义 MCP' }}
             </div>
-            <label class="field">
+            <!--
+              1.5.4o3 第 6 项：MCP 名称「点不开」。
+
+              原来这里是 <label> 包 <input>。Android WebView 里点击 label 内部的
+              输入框时，浏览器会把这次点击当成"label 的激活行为"转给关联控件，
+              而 label 没有 for 属性时会去猜第一个可labelable元素 —— 加上本行
+              紧接着被重渲染（disabled 状态变化），焦点就丢掉了，表现就是"点了没反应"。
+
+              修法：改成 <div class="field"> + 独立 <span>，完全不用 label 的隐式关联。
+              这样点击就是点击输入框本身，任何 WebView 都不会拦截。
+            -->
+            <div class="field">
               <span>名称<em class="req">必填</em></span>
               <input v-model="mcpForm.name" :disabled="!!editingMcpName" placeholder="例如 my-fileserver" />
-            </label>
-            <label class="field">
+            </div>
+            <div class="field">
               <span>传输方式</span>
               <select v-model="mcpForm.transport" class="select">
                 <option value="stdio">stdio（本地命令）</option>
                 <option value="sse">SSE（远程 URL）</option>
                 <option value="http">HTTP（远程 URL）</option>
               </select>
-            </label>
-            <label v-if="mcpForm.transport === 'stdio'" class="field">
+            </div>
+            <div v-if="mcpForm.transport === 'stdio'" class="field">
               <span>启动命令<em class="req">必填</em></span>
               <input v-model="mcpForm.command" placeholder="例如 npx 或 /usr/bin/python3" />
-            </label>
-            <label v-if="mcpForm.transport === 'stdio'" class="field">
+            </div>
+            <div v-if="mcpForm.transport === 'stdio'" class="field">
               <span>命令参数（每行一个）</span>
               <textarea v-model="mcpForm.args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/workspace" />
-            </label>
-            <label v-if="mcpForm.transport === 'stdio'" class="field">
+            </div>
+            <div v-if="mcpForm.transport === 'stdio'" class="field">
               <span>工作目录 cwd</span>
               <input v-model="mcpForm.cwd" placeholder="可选，默认引擎家目录" />
-            </label>
-            <label v-else class="field">
+            </div>
+            <div v-else class="field">
               <span>服务 URL<em class="req">必填</em></span>
               <input v-model="mcpForm.url" placeholder="https://host/mcp" />
-            </label>
-            <label class="field">
+            </div>
+            <div class="field">
               <span>环境变量（每行 KEY=VALUE）</span>
               <textarea v-model="mcpForm.env" rows="3" placeholder="API_KEY=sk-xxx&#10;DEBUG=true" />
-            </label>
-            <label v-if="mcpForm.transport !== 'stdio'" class="field">
+            </div>
+            <div v-if="mcpForm.transport !== 'stdio'" class="field">
               <span>请求头（每行 KEY=VALUE）</span>
               <textarea v-model="mcpForm.headers" rows="2" placeholder="Authorization=Bearer xxx" />
-            </label>
-            <label class="field">
+            </div>
+            <div class="field">
               <span>消息帧格式 framing</span>
               <input v-model="mcpForm.framing" placeholder="可选，默认按传输方式自动选择" />
-            </label>
-            <label class="field switch-row">
+            </div>
+            <div class="field switch-row">
               <span>启用</span>
               <input type="checkbox" v-model="mcpForm.enabled" class="switch" />
-            </label>
+            </div>
             <p v-if="mcpTestMsg" class="notice" :class="{ err: mcpTestMsg.startsWith('保存失败') || mcpTestMsg.startsWith('测试失败') || mcpTestMsg.startsWith('连接失败') || mcpTestMsg.startsWith('加载配置失败') }">{{ mcpTestMsg }}</p>
             <div class="sheet-actions">
               <button class="btn ghost" :disabled="mcpFormBusy" @click="showMcpForm = false">取消</button>

@@ -387,6 +387,8 @@ const effortOptions = computed(() => {
 // 1.5.4o2：每次选择模型就自动探测可用强度（后台静默，不打扰输入）；
 // 已经在会话里探过的模型不会再探。本地缓存用「provider:model」做 key。
 const effortProbing = ref<Set<string>>(new Set())
+// 模板里只关心「有没有在探测」，用 computed 暴露，避免在模板里直接读 Set。
+const effortProbingSize = computed(() => effortProbing.value.size)
 function effortCacheKey(): string {
   return `${config.currentProviderId}:${config.currentModel}`
 }
@@ -904,12 +906,21 @@ watch(text, () => {
           <button
             ref="effortToggleEl"
             class="act effort-chip"
-            :class="{ on: config.reasoningEffort !== 'auto', off: config.reasoningEffort === 'off' }"
+            :class="{
+              on: config.reasoningEffort !== 'auto',
+              off: config.reasoningEffort === 'off',
+              busy: effortProbingSize > 0,
+            }"
             :aria-expanded="effortOpen"
-            aria-label="推理强度"
+            :aria-label="`推理强度：${effortLabel}`"
             @click="toggleEffort"
           >
-            <span>{{ effortLabel }}</span>
+            <!-- 1.5.4o3 第 3 项：原来是纯文字挤在一个方框里，不好看。
+                 现在是「小圆点 + 档位名 + 细箭头」的胶囊：点状态用点色区分，
+                 探测中（还没拿到档位）时圆点呼吸，用户知道后台在问模型。 -->
+            <i class="effort-dot" />
+            <span class="effort-text">{{ effortLabel }}</span>
+            <CoomiIcon name="chevronDown" :size="10" class="effort-caret" :class="{ open: effortOpen }" />
           </button>
 
           <button class="act" aria-label="快捷指令" @click="toggleQuick">
@@ -1267,16 +1278,40 @@ watch(text, () => {
 .effort-chip {
   flex-shrink: 0;
   min-width: 0;
-  padding: 6px 9px;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 30px; padding: 0 8px 0 9px;
   border-radius: 999px;
   background: var(--fill);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   line-height: 1;
+  /* 只是一次颜色/阴影的变化，不做位移 —— 输入区里任何抖动都很显眼 */
+  transition: background .16s ease, color .16s ease, box-shadow .16s ease;
 }
-.effort-chip.on { color: var(--blue); background: var(--blue-soft); }
+.effort-chip:active { background: var(--fill-press); }
+.effort-chip.on {
+  color: var(--blue);
+  background: var(--blue-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 22%, transparent);
+}
 .effort-chip.off { color: var(--text-3); background: var(--fill); }
+.effort-text { letter-spacing: .01em; }
+.effort-caret { flex-shrink: 0; color: currentColor; opacity: .55; transition: transform .16s ease; }
+.effort-caret.open { transform: rotate(180deg); }
+/* 状态点：自动=灰、已选档位=蓝、关闭=空心 */
+.effort-dot {
+  flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3); opacity: .6;
+}
+.effort-chip.on .effort-dot { background: var(--blue); opacity: 1; }
+.effort-chip.off .effort-dot { background: transparent; box-shadow: inset 0 0 0 1.4px var(--text-3); opacity: 1; }
+/* 正在探测可用档位：圆点呼吸，表示后台在问模型 */
+.effort-chip.busy .effort-dot { animation: effort-dot-pulse 1.1s ease-in-out infinite; }
+@keyframes effort-dot-pulse {
+  0%, 100% { opacity: .28; transform: scale(.82); }
+  50% { opacity: 1; transform: scale(1.12); }
+}
 .effort-scrim { position: fixed; inset: 0; z-index: 3; border: 0; background: transparent; }
 .effort-pop {
   position: absolute; z-index: 4; right: 46px; bottom: calc(100% - 2px);

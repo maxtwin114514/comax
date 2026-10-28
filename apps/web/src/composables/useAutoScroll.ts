@@ -13,8 +13,16 @@ import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
  *   才判定为用户上翻，脱离跟随。避免虚拟回收行重测量把「正在跟随」误判成「用户跑了」。
  * - jumpToBottom 不再连续调度 rAF + smooth scroll，避免持续抢滚动位置导致页面乱跳。
  */
-const DETACH_PX = 40
-const REATTACH_PX = 14
+/**
+ * 脱离 / 重新跟随的距离阈值（1.5.4o3 第 5 项）。
+ *
+ * 用户原话：「自动置底的判定距离太长了，都滑到上面了还会自动置底」。
+ * 40px 在手感上等于「刚想往上翻一屏，它又把你拽回去」—— 手机上 40px 还不到一行。
+ * 现在缩到 12px：只要真的离开底部一行以内就停止跟随；回到底部 8px 内再恢复。
+ * 判断依据仍然只有**用户输入事件**（见 onScroll），所以缩小阈值不会误伤。
+ */
+const DETACH_PX = 12
+const REATTACH_PX = 8
 /** scrollTop 是小数，写进去再读回来可能差一点点。 */
 const SAME_POS_PX = 2
 /** 「回到底部」的平滑滚动期间不判定脱离 —— 那一路的 scroll 事件都是我们自己发的。 */
@@ -60,11 +68,28 @@ export function useAutoScroll(
     if (raf) return
     raf = requestAnimationFrame(() => {
       raf = 0
-      const el = target.value
-      if (!el || !following.value) return
-      settleVirtualBottom?.()
-      el.scrollTop = el.scrollHeight
-      pinnedTop = el.scrollTop
+      const scroller = target.value
+      if (!scroller || !following.value) return
+      /**
+       * 1.5.4o3 第 5 项：输出时"上下闪"的根因就在这里。
+       *
+       * 原来每帧先调 settleVirtualBottom()（虚拟列表内部会自己把滚动器挪到底），
+       * 紧接着又写一次 el.scrollTop = scrollHeight。两次写入如果落在同一帧里
+       * 且中间内容高度刚变化，浏览器会按第一个位置先绘制一次、再按第二个位置绘制
+       * 一次 —— 看到的就是"上下闪一下"。流式输出时每帧都在重复这个过程。
+       *
+       * 现在只做一件事：如果虚拟列表需要收尾就让它收尾，否则直接写到底；
+       * 且写之前先比一下目标位置，位置本来就对就完全不碰（避免无意义的重排）。
+       */
+      const bottom = scroller.scrollHeight
+      if (settleVirtualBottom) {
+        // 有虚拟滚动器时交给它：它会同时把内部容器与 scrollTop 一次对到底，
+        // 我们不再补写，避免两次写入。
+        settleVirtualBottom()
+      } else if (Math.abs(scroller.scrollTop - (bottom - scroller.clientHeight)) > SAME_POS_PX) {
+        scroller.scrollTop = bottom
+      }
+      pinnedTop = scroller.scrollTop
     })
   }
 

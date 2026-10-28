@@ -2213,12 +2213,47 @@ fn parse_argument_text(input: &str) -> Result<Value> {
     {
         return Ok(value);
     }
-    if let Some(object) = extract_json_object(trimmed)
-        && let Ok(value) = serde_json::from_str(object)
-    {
-        return Ok(value);
+    // 1.5.4o3：不再「从文本里抠出一个局部对象」当作参数。
+    //
+    // 原来的兜底会在 JSON 被截断时（流式分片还没拼完、上游限流掐断、或模型
+    // 输出被 max_tokens 截断）把**前半截**当成合法参数返回。于是工具拿到的是
+    // 缺字段的对象：有时能跑（参数恰好齐）、有时报「工具参数错误」，
+    // 而下一轮模型又把 JSON 写完整了 —— 现象就是「莫名其妙出现、又莫名其妙消失」。
+    // 现在只在文本**确实是完整 JSON**（允许被 ```json 包着）时才接受，
+    // 否则明确报错，由上层做一次带提示的重试。
+    if looks_truncated_json(trimmed) {
+        anyhow::bail!("tool arguments were truncated (incomplete JSON object)");
     }
     anyhow::bail!("tool arguments are not valid JSON")
+}
+
+/// 判断一段文本是不是「一个没写完的 JSON 对象」。
+///
+/// 只看括号配平，不尝试修补：配平了但解析失败说明是真的语法错误，
+/// 交给上面的 bail 报错即可；不配平说明是截断，值得让上层知道原因。
+fn looks_truncated_json(input: &str) -> bool {
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in input.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0 || in_string
 }
 
 fn strip_json_fence(input: &str) -> Option<&str> {

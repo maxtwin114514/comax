@@ -22,18 +22,56 @@ const thinkingRef = ref<HTMLElement | null>(null)
 const bodyHeight = ref(0)
 let timer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * 思考流式显示（1.5.4o3 第 4 项：原来"不够流畅"）。
+ *
+ * 原来每个 token 都做三件重活：重置 900ms 定时器、`nextTick` 里 split 整段思考
+ * （只看最后 4 行却要切全文）、再强制同步写一次 scrollTop。思考一长，主线程
+ * 每秒被叫停几十次，肉眼看到的就是"一顿一顿地蹦字"。
+ *
+ * 现在：
+ *   · 只在 rAF 里更新一次（同一帧内来多少个 token 都合并），最多 60Hz；
+ *   · 行文本用增量缓存：只对新增的那段尾巴重新 split，不再每帧切全文；
+ *   · 滚动用 rAF 批处理，且只在确实需要时写 scrollTop（避免无谓的重排）。
+ */
+let rafId = 0
+/** 增量解析缓存：上次切出来的行 + 上次处理到原文的哪个长度。 */
+let lineCache: string[] = []
+let lineCacheLength = -1
+
+/** 取最后 4 行；content 只是在末尾追加时，只重新切新增的部分。 */
+function tailLines(content: string): string[] {
+  if (content.length >= lineCacheLength && lineCacheLength >= 0) {
+    const appended = content.slice(lineCacheLength)
+    // 没有换行：只是当前最后一行变长，改最后一项即可。
+    if (!appended.includes('\n') && lineCache.length > 0) {
+      lineCache[lineCache.length - 1] += appended
+      lineCacheLength = content.length
+      return lineCache
+    }
+  }
+  lineCache = content.split('\n').slice(-4)
+  lineCacheLength = content.length
+  return lineCache
+}
+
 watch(() => props.block.content, () => {
   live.value = true
   if (timer) clearTimeout(timer)
   timer = setTimeout(() => { live.value = false }, 900)
   if (open.value) void measure()
-  // 思考内容在长：把 thinking-inner 滚到底，保持最新一行可见
-  nextTick(() => {
+  if (rafId) return
+  rafId = requestAnimationFrame(() => {
+    rafId = 0
     const el = thinkingRef.value
-    if (el) el.scrollTop = el.scrollHeight
+    // 只有真的溢出了才写 scrollTop：内容没超过 3.5 行时写它也是 0，纯浪费。
+    if (el && el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight
   })
 })
-onBeforeUnmount(() => { if (timer) clearTimeout(timer) })
+onBeforeUnmount(() => {
+  if (timer) clearTimeout(timer)
+  if (rafId) cancelAnimationFrame(rafId)
+})
 
 const reduced = typeof window !== 'undefined'
   && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -50,8 +88,8 @@ async function toggle() {
 }
 
 const chars = computed(() => props.block.content.replace(/\s+/g, '').length)
-/** 思考中显示用的行：最多取「最后 4 行」（3 行完整 + 半行模糊） */
-const visibleLines = computed(() => props.block.content.split('\n').slice(-4))
+/** 思考中显示用的行：最多取「最后 4 行」（3 行完整 + 半行模糊）。 */
+const visibleLines = computed(() => tailLines(props.block.content))
 </script>
 
 <template>

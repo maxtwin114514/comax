@@ -59,8 +59,26 @@ function sameSnapshot(a: readonly unknown[], b: readonly unknown[]): boolean {
 }
 
 function buildProcessBlock(run: readonly Timelineitem[]): ProcessBlockData {
-  const last = run[run.length - 1]
-  const answer = last?.kind === 'assistant' ? (last as AssistantMessage) : null
+  /**
+   * 哪一条正文算「回答」？
+   *
+   * 1.5.4o3 修的是这一步：原来只认「run 的最后一条」，只要是 assistant 才算回答。
+   * 于是模型先写一段正文、接着又思考/调工具时，那段正文就不再是最后一条，
+   * 被当成「中间叙述」折进折叠区 —— 用户看到的就是「最终输出被并进折叠里了」。
+   *
+   * 现在的规则：**最后一条有内容的 assistant 正文永远当回答**，无论它后面还跟着
+   * 多少段思考或工具。折叠区里只保留它之前的叙述，语义上就是「我先做了什么，
+   * 最后给出了什么」。空正文（只有工具调用那种占位消息）不参与判断。
+   */
+  let answerIndex = -1
+  for (let i = run.length - 1; i >= 0; i -= 1) {
+    const item = run[i]
+    if (item.kind === 'assistant' && item.content.trim()) {
+      answerIndex = i
+      break
+    }
+  }
+  const answer = answerIndex >= 0 ? (run[answerIndex] as AssistantMessage) : null
   const stages: ProcessStage[] = []
   let toolGroup: ToolCard[] | null = null
 
@@ -71,8 +89,9 @@ function buildProcessBlock(run: readonly Timelineitem[]): ProcessBlockData {
     toolGroup = null
   }
 
-  for (const item of run) {
-    if (item === answer) continue
+  for (let i = 0; i < run.length; i += 1) {
+    const item = run[i]
+    if (i === answerIndex) continue
     if (item.kind === 'tool') {
       if (!toolGroup) toolGroup = []
       toolGroup.push(item)

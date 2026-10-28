@@ -590,7 +590,7 @@ impl Agent {
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 session.messages.push(ChatMessage::internal_user(format!(
-                    "<tool_call_correction>The previous tool call was not executed because its arguments were invalid. Return the same tool call once more with exactly one valid JSON object matching the supplied schema. Do not use Markdown fences or explanatory text.\n{problems}</tool_call_correction>"
+                    "<tool_call_correction>The previous tool call was NOT executed because its arguments were invalid. Follow the hint field below, then return the same tool call once more with exactly one valid JSON object matching the supplied schema. Do not use Markdown fences or explanatory text, and do not stop before the JSON is complete.\n{problems}</tool_call_correction>"
                 )));
                 self.run_checkpoint(session);
                 continue;
@@ -846,9 +846,17 @@ fn tool_correction_problem(call: &crate::InvalidToolCall, specs: &[crate::ToolSp
         .and_then(|spec| serde_json::to_string(&spec.parameters).ok())
         .map(|schema| truncate_chars(&schema, 4_000))
         .unwrap_or_else(|| "unavailable; do not guess fields".into());
+    // 截断（流式分片没拼完 / 被 max_tokens 掐断）与真正的语法错误要分开说：
+    // 前者必须明确要求"重新完整输出一次"，否则模型往往只补一小段，还是坏的。
+    let truncated = call.reason.contains("truncated");
+    let hint = if truncated {
+        "The previous arguments were cut off before the JSON closed. Emit the ENTIRE arguments object again from the first character, keep it compact (no pretty-printing), and finish every closing brace."
+    } else {
+        "Return the same tool call once more with exactly one valid JSON object matching the supplied schema."
+    };
     format!(
-        "tool_name: {}\nvalidation_stage: arguments\nfield_error: {}\njson_schema: {}",
-        call.name, call.reason, schema
+        "tool_name: {}\nvalidation_stage: arguments\nfield_error: {}\nhint: {}\njson_schema: {}",
+        call.name, call.reason, hint, schema
     )
 }
 

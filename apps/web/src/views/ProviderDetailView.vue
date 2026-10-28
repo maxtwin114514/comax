@@ -251,52 +251,59 @@ function reasoningFieldOptions(): ThemeSelectOption[] {
   }
 }
 
-function defaultReasoningField(): string {
-  return reasoningFieldOptions()[0]?.value ?? 'reasoning_effort'
+/**
+ * 启用档位（1.5.4o3 第 2 项）。
+ *
+ * 用户要求**删掉"原模型推理字段 + 四档映射"那一套**，只留一份可编辑的档位清单：
+ * 模型能用哪些档位，就写哪些，输入区也只显示这些。理由很实在 ——
+ * 映射表要求用户先知道上游认哪个字段名（reasoning_effort / thinking.budget_tokens …），
+ * 再按档位逐个填值，绝大多数人填不对；而"能用哪几档"是模型自己就能回答的问题，
+ * 点一次探测就出来了，之后还能手动改。
+ *
+ * 存储仍然复用 modelParameters[model].thinkingEfforts（探测结果也写这里），
+ * 所以不需要引擎改协议；reasoningField / reasoningMapping 保留读取兼容，不再写入。
+ */
+const EFFORT_PRESETS = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal'] as const
+
+function modelEfforts(model: string): string[] {
+  const list = modelParams(model).thinkingEfforts
+  return Array.isArray(list) ? list : []
 }
 
-function defaultReasoningMapping(field: string): NonNullable<ModelParameters['reasoningMapping']> {
-  if (field.endsWith('budget_tokens') || field.endsWith('thinkingBudget')) {
-    return { low: '1024', medium: '4096', high: '8192', xhigh: '16384' }
-  }
-  if (field.endsWith('thinkingLevel')) {
-    return { low: 'LOW', medium: 'MEDIUM', high: 'HIGH', xhigh: 'HIGH' }
-  }
-  if (field === 'enable_thinking') {
-    return { low: 'true', medium: 'true', high: 'true', xhigh: 'true' }
-  }
-  return { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' }
+/** 空清单时的兜底：只给低/中，跟输入区保持一致。 */
+function effectiveEfforts(model: string): string[] {
+  const list = modelEfforts(model)
+  return list.length > 0 ? list : ['low', 'medium']
 }
 
-function setReasoningField(model: string, field: string) {
+function toggleEffort(model: string, effort: string) {
   const params = modelParams(model)
-  params.reasoningField = field
-  params.reasoningMapping = defaultReasoningMapping(field)
+  const current = new Set(effectiveEfforts(model))
+  if (current.has(effort)) current.delete(effort)
+  else current.add(effort)
+  // 按预设顺序写回，界面上不会因为点击顺序而乱跳。
+  const ordered = [...EFFORT_PRESETS].filter(item => current.has(item))
+  params.thinkingEfforts = ordered
 }
 
-function updateReasoningMapping(model: string, level: 'low' | 'medium' | 'high' | 'xhigh', event: Event) {
-  ensureReasoningMapping(model)
+/** 手动补一个清单里没有的档位名（个别网关有自定义档位）。 */
+const customEffort = ref<Record<string, string>>({})
+function addCustomEffort(model: string) {
+  const value = (customEffort.value[model] ?? '').trim()
+  if (!value) return
   const params = modelParams(model)
-  params.reasoningMapping![level] = (event.target as HTMLInputElement).value.trim()
-}
-
-function ensureReasoningMapping(model: string) {
-  const params = modelParams(model)
-  if (!params.reasoningField) params.reasoningField = defaultReasoningField()
-  if (!params.reasoningMapping) params.reasoningMapping = defaultReasoningMapping(params.reasoningField)
+  const merged = [...new Set([...effectiveEfforts(model), value])]
+  params.thinkingEfforts = merged
+  customEffort.value[model] = ''
 }
 
 function toggleModelHelp(model: string) {
-  if (expandedHelpModel.value === model) {
-    expandedHelpModel.value = null
-    return
-  }
-  ensureReasoningMapping(model)
-  expandedHelpModel.value = model
+  expandedHelpModel.value = expandedHelpModel.value === model ? null : model
 }
 
 function reasoningSummary(model: string): string {
-  return modelParams(model).reasoningField ? '已映射' : '协议默认'
+  const list = effectiveEfforts(model)
+  return list.length > 0 ? list.join(' / ') : '未设置'
 }
 function setOverride(model: string, key: keyof CapabilityOverride, event: Event) {
   if (!draft.value) return
@@ -726,7 +733,7 @@ function openModelConfig() {
               <label class="model-param"><span>Top-k<small>默认不发送</small></span>
                 <input type="number" min="1" max="65536" step="1" placeholder="默认" :value="modelParams(model).topK ?? ''" @input="updateOptionalNumber(model, 'topK', $event)" />
               </label>
-              <div class="model-param"><span>推理映射<small>Comax 四档</small></span><button type="button" class="mapping-trigger" @click="toggleModelHelp(model)">{{ reasoningSummary(model) }}</button></div>
+              <div class="model-param"><span>思考档位<small>可编辑</small></span><button type="button" class="mapping-trigger" @click="toggleModelHelp(model)">{{ reasoningSummary(model) }}</button></div>
               <label class="model-param model-context"><span>上下文窗口</span>
                 <span class="context-fields">
                   <ThemeSelect
@@ -752,36 +759,41 @@ function openModelConfig() {
               <button class="parameter-help" type="button" :class="{ on: expandedHelpModel === model }" aria-label="参数调节指南" @click="toggleModelHelp(model)">?</button>
             </div>
             <section v-if="expandedHelpModel === model" class="parameter-guide">
-              <div class="guide-title"><strong>参数建议与推理映射</strong><span>留空即使用模型默认值</span></div>
+              <div class="guide-title"><strong>参数与思考档位</strong><span>留空即使用模型默认值</span></div>
               <p>温度越低越稳定，代码与工具任务建议 0–0.4；创意任务可使用 0.7–1.2。Top-k 会限制候选词范围，仅在提供商支持时填写。</p>
-              <div class="reasoning-field">
-                <span>原模型推理字段</span>
-                <ThemeSelect
-                  :model-value="modelParams(model).reasoningField || defaultReasoningField()"
-                  :options="reasoningFieldOptions()"
-                  title="选择原模型推理字段"
-                  aria-label="原模型推理字段"
-                  @update:model-value="setReasoningField(model, $event)"
-                />
-              </div>
-              <div class="mapping-grid">
-                <label v-for="level in REASONING_LEVELS" :key="level.key">
-                  <span>Comax {{ level.label }}</span>
-                  <input :value="modelParams(model).reasoningMapping?.[level.key] || ''" :placeholder="level.key" @input="updateReasoningMapping(model, level.key, $event)" />
-                </label>
-              </div>
-              <p class="mapping-note">对话设置中的推理档位会按上表转换后写入 <code>{{ modelParams(model).reasoningField }}</code>；自动档不发送该字段。</p>
+
               <!--
-                1.5.4 第 13 项：可用强度由模型自己说话。
-                「保存模型列表」前会自动探测一次；这里也可以单独重测。
+                启用档位（1.5.4o3 第 2 项）：删掉「原模型推理字段 + 四档映射」，
+                只留这一份清单。点亮的档位就是输入区会显示的档位。
               -->
-              <div class="reasoning-field">
-                <span>可用思考强度</span>
-                <button type="button" class="mapping-trigger" @click="probeThinkingEfforts(model)">
-                  {{ probingEffort === model ? '探测中…' : (modelParams(model).thinkingEfforts?.join(' / ') || '未探测，点击获取') }}
+              <div class="effort-head">
+                <span>启用思考档位</span>
+                <button type="button" class="probe-btn" :disabled="probingEffort === model" @click="probeThinkingEfforts(model)">
+                  {{ probingEffort === model ? '探测中…' : '自动探测' }}
                 </button>
               </div>
-              <p class="mapping-note">探测结果决定输入区那排档位（关闭/自动 + 这些值）；探测不到时按协议给一份标注为「推断」的清单。</p>
+              <div class="effort-chips">
+                <button
+                  v-for="effort in EFFORT_PRESETS" :key="effort"
+                  type="button"
+                  class="effort-toggle"
+                  :class="{ on: effectiveEfforts(model).includes(effort) }"
+                  @click="toggleEffort(model, effort)"
+                >{{ effort }}</button>
+              </div>
+              <div class="effort-custom">
+                <input
+                  :value="customEffort[model] ?? ''"
+                  placeholder="再加一个自定义档位名"
+                  @input="customEffort[model] = ($event.target as HTMLInputElement).value"
+                  @keyup.enter="addCustomEffort(model)"
+                />
+                <button type="button" class="probe-btn" @click="addCustomEffort(model)">添加</button>
+              </div>
+              <p class="mapping-note">
+                点亮的就是这个模型可用的档位（当前：<code>{{ reasoningSummary(model) }}</code>）。
+                输入区会显示「关闭 / 自动 + 这些档位」；探测不到时按协议给一份标注为推断的清单，你可以直接手动改。
+              </p>
             </section>
             <div class="capability-overrides">
               <span>模型能力</span>
@@ -888,6 +900,27 @@ function openModelConfig() {
 .mapping-grid input { width:100%; min-width:0; height:29px; padding:0 5px; border:1px solid var(--border); border-radius:5px; background:var(--bg); color:var(--text); font-size:10px; }
 .parameter-guide .mapping-note { color:var(--text-3); }
 .mapping-note code { overflow-wrap:anywhere; color:var(--blue); font-family:var(--font-mono); }
+
+/* ── 启用思考档位（1.5.4o3）：一排可点亮的档位 + 自定义补一个 ── */
+.effort-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; }
+.effort-head > span { color:var(--text-2); font-size:11px; font-weight:650; }
+.probe-btn {
+  min-height:28px; padding:0 10px; border:1px solid var(--border); border-radius:6px;
+  background:var(--fill); color:var(--blue); font-size:10.5px; font-weight:600;
+}
+.probe-btn:disabled { opacity:.6; }
+.effort-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+.effort-toggle {
+  min-width:0; min-height:30px; padding:0 11px; border-radius:6px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text-3);
+  font-size:11px; font-weight:600; font-family:var(--font-mono);
+}
+.effort-toggle.on { border-color:var(--blue); background:var(--blue-soft); color:var(--blue); }
+.effort-custom { display:flex; gap:6px; margin-top:7px; }
+.effort-custom input {
+  flex:1; min-width:0; height:30px; padding:0 8px; border:1px solid var(--border);
+  border-radius:6px; background:var(--bg); color:var(--text); font-size:11px;
+}
 .empty { padding: 20px 12px; text-align: center; color: var(--text-3); font-size: 13px; }
 .danger-area { display: flex; justify-content: center; margin-top: 24px; }
 .danger-link { min-height: 36px; padding: 0 12px; color: var(--danger); font-size: 13px; }
