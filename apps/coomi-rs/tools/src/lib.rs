@@ -823,6 +823,31 @@ impl CoreTools {
         ToolResult::success(text)
     }
 
+    /// 把截图工具的返回值（路径）变成真正的图像内容（1.5.5）。
+    ///
+    /// 无障碍服务返回的是文件路径（可能是 `/data/.../screenshot-xxx.png`，
+    /// 也可能是带 `[control::screenshot]` 前缀的一行）。这里把路径抠出来、
+    /// 读成字节并 `with_image` —— 只返回路径的话模型只能靠 OCR 猜画面。
+    fn screenshot_result(&self, output: &str) -> ToolResult {
+        let path = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .find(|line| line.ends_with(".png") || line.ends_with(".webp") || line.ends_with(".jpg"))
+            .unwrap_or("");
+        if path.is_empty() {
+            return ToolResult::success(format!("[control::screenshot] {output}"));
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return ToolResult::success(format!("[control::screenshot] {output}"));
+        };
+        if bytes.len() > 10 * 1024 * 1024 {
+            return ToolResult::error("screenshot exceeds the 10 MiB tool limit");
+        }
+        ToolResult::success(format!("screenshot captured: {path}\nbytes: {}", bytes.len()))
+            .with_image("image/png", BASE64_STANDARD.encode(bytes))
+    }
+
     async fn view_image(&self, arguments: &Value) -> ToolResult {
         let Some(path) = string_arg(arguments, "path") else {
             return ToolResult::error("missing string argument: path");
@@ -1251,7 +1276,13 @@ impl CoreTools {
             let output = self.run_simple_cmd(&format!("python3 -c \"import pytesseract,sys;print(pytesseract.image_to_string(sys.argv[1]))\" {}", Self::shell_escape(path)));
             ToolResult::success(output)
         } else {
-            ToolResult::success("本地 OCR 不可用：未安装 tesseract 或 pytesseract。可在 Comax 终端安装：apt install tesseract-ocr tesseract-ocr-chi-sim")
+            // 1.5.5：装不上 OCR 时别再只丢一句话。明确告诉模型「换条路」——
+            // 视觉模型可以直接看图（view_image），不需要 OCR。
+            ToolResult::success(
+                "本地 OCR 不可用（未安装 tesseract / pytesseract）。\n\
+                 建议改用 view_image 直接把图片交给视觉模型；或先在终端安装：\n\
+                 apt update && apt install -y tesseract-ocr tesseract-ocr-chi-sim",
+            )
         }
     }
 
@@ -1370,15 +1401,24 @@ impl CoreTools {
             "foreground" => Some(json!({ "action": "foreground" })),
             "read_screen" => Some(json!({ "action": "read_screen" })),
             "input_text" => Some(json!({ "action": "input_text" })),
+            // 1.5.5：截屏走无障碍服务（MediaProjection 由服务侧 takeScreenshot），
+            // 把 PNG 写到应用私有目录再读回来作为图像内容 —— 视觉模型才能"看"到屏幕。
+            "screenshot" => Some(json!({ "action": "screenshot" })),
             _ => None,
         };
         if let Some(command) = accessibility_command {
             let needs_screen = matches!(action, "tap" | "swipe" | "long_press" | "text"
                 | "send" | "fill_and_send" | "click_text" | "global" | "foreground"
-                | "read_screen" | "input_text");
+                | "read_screen" | "input_text" | "screenshot");
             if self.control_queue_dir().is_some() {
-                let (ok, output) = self.run_control_command(command, Duration::from_secs(6));
+                let timeout = if action == "screenshot" { Duration::from_secs(15) } else { Duration::from_secs(6) };
+                let (ok, output) = self.run_control_command(command, timeout);
                 if ok {
+                    // 截屏：无障碍服务把 PNG 写在应用私有目录，返回值是那个路径。
+                    // 这里读回来作为图像内容，模型与界面都能直接用。
+                    if action == "screenshot" {
+                        return self.screenshot_result(&output);
+                    }
                     return ToolResult::success(format!("[control::{action}] {output}"));
                 }
                 // 无障碍真的超时（服务没开 / 队列没消费）才退回 adb；
@@ -2330,8 +2370,10 @@ impl ToolRuntime for CoreTools {
                     action=foreground 取前台应用包名；action=click_text 按文字点按钮；\
                     action=tap/swipe/long_press 做坐标手势；action=text 填入当前输入框；\
                     action=send 点发送；action=fill_and_send 填入并发送（聊天回复用这个）；\
-                    action=global 执行系统动作（name=back/home/recents/notifications）。\
-                    想操作某个 App 时先用 read_screen 看清界面再动手，不要盲点坐标。".into(),
+                    action=global 执行系统动作（name=back/home/recents/notifications）；\
+                    action=screenshot 截当前屏幕并把画面作为图片返回（需 Android 11+ 与无障碍授权）。\
+                    想操作某个 App 时先用 read_screen 看清界面再动手，不要盲点坐标；\
+                    界面是自绘 / 游戏 / 纯图片内容时 read_screen 读不到文字，改用 screenshot 直接看画面。".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

@@ -207,7 +207,23 @@ impl ProviderRegistry {
             } else {
                 provider.display
             };
-            let mut model_vision_support = provider
+            // ── 视觉能力判定（1.5.5）──────────────────────────────────────
+            //
+            // 旧逻辑：`capabilityOverrides[model].vision` → 缺失时回落到
+            // `provider.supports_vision`（默认 false）。而前端过去会给**每个模型**
+            // 都写一条 `vision: false`，于是 providers.json 里满屏 false，
+            // 连 gpt-5 / claude / gemini 这类明确支持图像输入的模型都被当作文本模型：
+            // 图片被静默丢弃，模型只能去调 OCR —— 用户看到的就是
+            // 「OCR 只能提取文字，截图也识别不了」。
+            //
+            // 现在三层：
+            //   ① 显式 override（用户真的点过那个勾）优先，但只在它**为 true**、
+            //      或者用户同时在顶层显式关闭时才作数；
+            //   ② 顶层 `supports_vision: true`；
+            //   ③ 都没有时按模型名判断（保守的白名单，见 heuristic_vision_model）。
+            // 猜错也不会坏：请求被上游拒图时 agent 有 image-compatibility 回退，
+            // 会剥掉图片重试并把会话标记为降级。
+            let explicit_vision = provider
                 .extra
                 .get("capabilityOverrides")
                 .and_then(Value::as_object)
@@ -219,26 +235,30 @@ impl ProviderRegistry {
                         .and_then(Value::as_bool)
                         .map(|enabled| (model.clone(), enabled))
                 })
+                .filter(|(_, enabled)| *enabled)
                 .collect::<BTreeMap<_, _>>();
-            for model in provider
+            let declared_models = provider
                 .extra
                 .get("models")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-            {
-                model_vision_support
-                    .entry(model.to_owned())
-                    .or_insert(provider.supports_vision);
+                .map(str::to_owned)
+                .chain(std::iter::once(provider.model.clone()))
+                .chain(provider.fast_model.clone())
+                .filter(|model| !model.trim().is_empty());
+            let mut model_vision_support = BTreeMap::new();
+            for model in declared_models {
+                let enabled = explicit_vision.get(&model).copied().unwrap_or_else(|| {
+                    provider.supports_vision || heuristic_vision_model(&model)
+                });
+                model_vision_support.insert(model, enabled);
             }
-            model_vision_support
-                .entry(provider.model.clone())
-                .or_insert(provider.supports_vision);
             let manual_vision = model_vision_support
                 .get(&provider.model)
                 .copied()
-                .unwrap_or(provider.supports_vision);
+                .unwrap_or_else(|| provider.supports_vision || heuristic_vision_model(&provider.model));
             let mut capabilities = coomi_engine::ModelCapabilities {
                 context_window: provider.context_window.unwrap_or(256_000),
                 effective_context_window_percent: provider
@@ -422,6 +442,37 @@ impl ProviderRegistry {
                 .find(|provider| provider.id.eq_ignore_ascii_case(id))
         })
     }
+}
+
+/// 模型名 → 是否大概率支持图像输入（1.5.5）。
+///
+/// 只用于**配置没写清楚时**的兜底判定，不是权威结论：命中时把图片发过去，
+/// 真被上游拒了 agent 会自动剥图重试并降级（`maybe_degrade_vision`）。
+///
+/// 反过来（该发不发）代价更大 —— 用户看到的是「视觉模型也不会看图」。
+fn heuristic_vision_model(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    const HINTS: [&str; 26] = [
+        "vision",
+        "-vl", "vl-", "/vl", "vlm",
+        "gpt-4o", "gpt-4.1", "gpt-5", "gpt-6",
+        "o3", "o4-mini",
+        "claude",
+        "gemini",
+        "glm-4v", "glm-5v", "glm-4.5v",
+        "pixtral",
+        "internvl",
+        "minicpm-v",
+        "llava",
+        "qwen2-vl", "qwen2.5-vl", "qwen3-vl",
+        "step-1v", "step-2v",
+        "doubao-vision",
+    ];
+    HINTS.iter().any(|hint| name.contains(hint))
+        // 「……-vision-exp」这类尾部标记已经覆盖；这里再兜一层
+        // 「图像 / 多模态」的常见写法。
+        || name.contains("multimodal")
+        || name.contains("omni")
 }
 
 fn apply_model_context_window(provider: &mut ProviderConfig) {

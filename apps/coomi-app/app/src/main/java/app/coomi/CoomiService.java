@@ -61,6 +61,8 @@ public class CoomiService extends Service {
     };
     private static final String SHELL_BLOCK_START = "# >>> Comax Android managed block >>>";
     private static final String SHELL_BLOCK_END = "# <<< Comax Android managed block <<<";
+    /** 报错日志页「修复并重启引擎」用的 action（见 onStartCommand）。 */
+    public static final String ACTION_REPAIR_RESTART = "app.coomi.action.REPAIR_RESTART";
 
     private final IBinder mBinder = new LocalBinder();
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
@@ -159,7 +161,19 @@ public class CoomiService extends Service {
             }
         });
     }
-    @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        // 「修复并重启引擎」（1.5.4o4 第 5 项）：报错日志页不绑定服务，
+        // 只发一个带 action 的 intent，由这里在服务内线程上重启，
+        // 避免"修复完还得回控制台手动点重启"。
+        if (intent != null && ACTION_REPAIR_RESTART.equals(intent.getAction())) {
+            mExecutor.execute(() -> {
+                Logger.logInfo(LOG_TAG, "Repair restart requested from log console");
+                stopEngineSync();
+                startEngineSync();
+            });
+        }
+        return START_STICKY;
+    }
 
     @Override
     public void onDestroy() {

@@ -32,6 +32,17 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// 单个档位探测的三种结果（1.5.4o5 第 3 项并发探测用）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeOutcome {
+    /// 上游 2xx：这个档位可用。
+    Supported,
+    /// 400/422 且错误提到 reasoning/thinking/effort：该档位不被支持，继续看别的。
+    Rejected,
+    /// 鉴权失败 / 网络不通 / 其它状态码：结论不可信，整体放弃实测。
+    Abort,
+}
+
 pub struct HttpModelProvider {
     config: ProviderConfig,
     client: Client,
@@ -46,6 +57,41 @@ impl HttpModelProvider {
             .build()
             .context("failed to build provider HTTP client")?;
         Ok(Self { config, client, key_cursor: std::sync::atomic::AtomicUsize::new(0) })
+    }
+
+    /// 探测单个思考档位。
+    ///
+    /// 必须是 `&self` 方法而不是自由函数：要走 `authenticated()` 带 API Key 和
+    /// 自定义 header（1.5.4o5 第 3 项并发化时踩过这个坑 —— 漏了鉴权的话每个
+    /// 探测都会 401，清单直接空掉）。
+    async fn probe_one_effort(&self, endpoint: &str, candidate: &'static str) -> ProbeOutcome {
+        let mut body = json!({
+            "model": self.config.model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false,
+            "max_tokens": 16,
+        });
+        apply_model_parameters(&self.config, &mut body, Some(candidate), Some(false));
+        let request = self
+            .with_provider_headers(self.authenticated(self.client.post(endpoint)), None)
+            .timeout(Duration::from_secs(12))
+            .json(&body);
+        let Ok(response) = request.send().await else {
+            // 连不上就别继续猜了：这是网络问题，不是"不支持该档位"。
+            return ProbeOutcome::Abort;
+        };
+        let status = response.status();
+        if status.is_success() {
+            return ProbeOutcome::Supported;
+        }
+        let detail = response.text().await.unwrap_or_default().to_lowercase();
+        let reasoning_related = detail.contains("reasoning")
+            || detail.contains("thinking")
+            || detail.contains("effort");
+        if matches!(status.as_u16(), 400 | 422) && reasoning_related {
+            return ProbeOutcome::Rejected;
+        }
+        ProbeOutcome::Abort
     }
 
     /// 探测这个模型真正接受的思考强度（`max` / `high` / …）。
@@ -68,36 +114,72 @@ impl HttpModelProvider {
             return None;
         }
         let endpoint = endpoint(&self.config.base_url, "chat/completions");
-        let mut supported = Vec::new();
-        for candidate in ["max", "xhigh", "high", "medium", "low", "minimal"] {
-            let mut body = json!({
-                "model": self.config.model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": false,
-                "max_tokens": 16,
-            });
-            apply_model_parameters(&self.config, &mut body, Some(candidate), Some(false));
-            let request = self
-                .with_provider_headers(self.authenticated(self.client.post(&endpoint)), None)
-                .timeout(Duration::from_secs(12))
-                .json(&body);
-            let Ok(response) = request.send().await else {
-                return None;
-            };
-            let status = response.status();
-            if status.is_success() {
-                supported.push(candidate.to_owned());
-                continue;
+        // 1.5.4o5 第 3 项：原来 6 个候选值是**串行**发的，每个还有 12 秒超时 ——
+        // 最坏情况下用户要盯着界面等 72 秒，期间看着就是「引擎卡住了」。
+        // 现在改成并发（上限 3，既压住上游限流，也保证最慢只等两轮）。
+        const CANDIDATES: [&str; 6] = ["max", "xhigh", "high", "medium", "low", "minimal"];
+        // 分批并发：每批 3 个同时发，批间串行。
+        //
+        // 不用 buffer_unordered：那个组合要求 future 满足 'static，闭包捕获 `&self`
+        // 时会撞上 "implementation of FnOnce is not general enough"（真的踩到了）。
+        // join_all 在同一作用域内借用，既没有生命周期约束，也能把最坏等待
+        // 从 6×12s 压到 2×12s。
+        // 分批并发（每批 3 个），把最坏等待从 6×12s 压到 2×12s。
+        //
+        // 这里刻意不用 `map(|c| async {...})` + `join_all`：闭包捕获 `&str` 会让
+        // 编译器给 `probe_reasoning_efforts` 推出一份 higher-ranked 的 future 类型，
+        // 进而把 web.rs 里的 axum handler 搞成 "implementation of FnOnce is not
+        // general enough"（真踩过）。用无闭包的 join3 / join 写法，类型干干净净。
+        let mut supported: Vec<String> = Vec::new();
+        let mut aborted = false;
+        let mut index = 0;
+        while index < CANDIDATES.len() {
+            let remaining = CANDIDATES.len() - index;
+            let mut outcomes = Vec::with_capacity(3);
+            if remaining >= 3 {
+                let (a, b, c) = futures_util::future::join3(
+                    self.probe_one_effort(&endpoint, CANDIDATES[index]),
+                    self.probe_one_effort(&endpoint, CANDIDATES[index + 1]),
+                    self.probe_one_effort(&endpoint, CANDIDATES[index + 2]),
+                )
+                .await;
+                outcomes.extend([a, b, c]);
+                index += 3;
+            } else if remaining == 2 {
+                let (a, b) = futures_util::future::join(
+                    self.probe_one_effort(&endpoint, CANDIDATES[index]),
+                    self.probe_one_effort(&endpoint, CANDIDATES[index + 1]),
+                )
+                .await;
+                outcomes.extend([a, b]);
+                index += 2;
+            } else {
+                outcomes.push(self.probe_one_effort(&endpoint, CANDIDATES[index]).await);
+                index += 1;
             }
-            let detail = response.text().await.unwrap_or_default().to_lowercase();
-            let reasoning_related = detail.contains("reasoning")
-                || detail.contains("thinking")
-                || detail.contains("effort");
-            if matches!(status.as_u16(), 400 | 422) && reasoning_related {
-                continue;
+            let base = index - outcomes.len();
+            for (offset, outcome) in outcomes.into_iter().enumerate() {
+                match outcome {
+                    ProbeOutcome::Supported => supported.push(CANDIDATES[base + offset].to_owned()),
+                    ProbeOutcome::Abort => aborted = true,
+                    ProbeOutcome::Rejected => {}
+                }
             }
+            // 这批已出现鉴权/网络失败：后面的批次没有意义，直接收工。
+            if aborted {
+                break;
+            }
+        }
+        // 任何一个探测被打断，就不能给出"这份清单是实测结果"的结论。
+        if aborted {
             return None;
         }
+        supported.sort_by_key(|value| {
+            CANDIDATES
+                .iter()
+                .position(|candidate| candidate == value)
+                .unwrap_or(usize::MAX)
+        });
         (!supported.is_empty()).then_some(supported)
     }
 
@@ -1857,6 +1939,24 @@ fn stream_event_error(phase: &'static str, value: &Value) -> anyhow::Error {
     .into()
 }
 
+/// OpenAI 兼容协议下，一条 user 消息的 content。
+///
+/// 没有图、或模型不支持视觉 → 纯字符串（最兼容，也最省 token）。
+/// 有图 → 标准的多模态数组：先文本、再逐个 `image_url`。
+fn openai_user_content(message: &ChatMessage, supports_vision: bool) -> Value {
+    if !supports_vision || message.images.is_empty() {
+        return Value::String(message.content.clone());
+    }
+    let mut content = vec![json!({"type": "text", "text": message.content})];
+    content.extend(message.images.iter().map(|image| {
+        json!({
+            "type": "image_url",
+            "image_url": {"url": image.data_url()}
+        })
+    }));
+    Value::Array(content)
+}
+
 fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Vec<Value>> {
     let mut output = Vec::new();
     let normalized = normalize_history(messages);
@@ -1866,7 +1966,12 @@ fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Ve
         }
         let value = match message.role {
             Role::System => json!({"role": "system", "content": message.content}),
-            Role::User => json!({"role": "user", "content": message.content}),
+            // 1.5.5：用户消息里的图片必须真的进请求。
+            //
+            // 旧版这里直接返回纯文本 content —— 用户拖进来的截图/图片被**静默丢掉**，
+            // 模型只看到一行「请读取这些已导入文件：/path/xxx.png」，于是只能去
+            // 调 OCR，而 OCR 只认字、认不出画面。看起来就是「视觉模型也不会看图」。
+            Role::User => openai_user_content(message, supports_vision),
             Role::Assistant => {
                 // 空 assistant 轮（content 与 tool_calls 均为空）不带任何信息，
                 // 部分 OpenAI 兼容端点（如 DeepSeek 官方）会直接 400 拒绝
@@ -1937,6 +2042,23 @@ fn responses_input(messages: &[ChatMessage], supports_vision: bool) -> Result<Ve
             continue;
         }
         match message.role {
+            // 1.5.5：同上 —— 用户图片走 input_image，不能只给纯文本。
+            Role::User if supports_vision && !message.images.is_empty() => {
+                let mut items = vec![json!({
+                    "type": "input_text",
+                    "text": message.content
+                })];
+                items.extend(message.images.iter().map(|image| {
+                    json!({
+                        "type": "input_image",
+                        "image_url": image.data_url()
+                    })
+                }));
+                input.push(json!({
+                    "role": "user",
+                    "content": Value::Array(items)
+                }));
+            }
             Role::System | Role::User => input.push(json!({
                 "role": role_name(message.role),
                 "content": message.content
@@ -2016,6 +2138,21 @@ fn anthropic_messages(
         }
         match message.role {
             Role::System => system.push(message.content.clone()),
+            // 1.5.5：用户图片走 image block。
+            Role::User if supports_vision && !message.images.is_empty() => {
+                let mut blocks = vec![json!({"type": "text", "text": message.content})];
+                blocks.extend(message.images.iter().map(|image| {
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": image.data
+                        }
+                    })
+                }));
+                output.push(json!({"role": "user", "content": blocks}));
+            }
             Role::User => output.push(json!({"role": "user", "content": message.content})),
             Role::Assistant => {
                 // 空 assistant 轮（content 与 tool_calls 均为空）不带信息，跳过。
@@ -2080,6 +2217,19 @@ fn gemini_messages(
         }
         match message.role {
             Role::System => system.push(message.content.clone()),
+            // 1.5.5：用户图片走 inlineData。
+            Role::User if supports_vision && !message.images.is_empty() => {
+                let mut parts = vec![json!({"text": message.content})];
+                parts.extend(message.images.iter().map(|image| {
+                    json!({
+                        "inlineData": {
+                            "mimeType": image.media_type,
+                            "data": image.data
+                        }
+                    })
+                }));
+                output.push(json!({"role": "user", "parts": parts}));
+            }
             Role::User => output.push(json!({
                 "role": "user",
                 "parts": [{"text": message.content}]

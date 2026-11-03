@@ -206,6 +206,56 @@
                 android:textSize="@dimen/coomi_text_caption"
                 android:lineSpacingExtra="2dp"/>
 
+            <!-- 引擎修复（1.5.4o4 第 5 项）：把能再生的东西删掉、保留对话与工作区，
+                 下一次启动按 APK 内置资产重新部署。放在日志下面，是因为用户
+                 通常先看日志确认修不了，再点这里。 -->
+            <TextView
+                style="@style/Coomi.Text.SectionLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_l"
+                android:text="@string/coomi_log_repair_title"/>
+
+            <LinearLayout
+                style="@style/Coomi.Card"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="@dimen/coomi_space_m"
+                    android:text="@string/coomi_log_repair_desc"
+                    android:textColor="?attr/coomiText2"
+                    android:textSize="@dimen/coomi_text_caption"
+                    android:lineSpacingExtra="3dp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingStart="@dimen/coomi_space_m"
+                    android:paddingEnd="@dimen/coomi_space_m"
+                    android:paddingBottom="@dimen/coomi_space_m"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_log_repair"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:text="@string/coomi_log_repair_action"/>
+
+                    <Button
+                        android:id="@+id/btn_log_restart_engine"
+                        style="@style/Coomi.Button.Outline"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="@dimen/coomi_space_s"
+                        android:text="@string/coomi_log_repair_restart"/>
+                </LinearLayout>
+            </LinearLayout>
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

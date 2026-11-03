@@ -42,6 +42,8 @@ export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
 
 export interface ConnectionSettings {
   providerRetryCount: number
+  /** 无限重试（1.5.4o5 第 4 项）：不管报什么错都重试，只有点停止才中断。 */
+  retryForever: boolean
   wsRetryCount: number
   reconnectInitialDelayMs: number
   reconnectMaxDelayMs: number
@@ -50,6 +52,7 @@ export interface ConnectionSettings {
 
 export const DEFAULT_CONNECTION_SETTINGS: ConnectionSettings = {
   providerRetryCount: 2,
+  retryForever: false,
   wsRetryCount: 10,
   reconnectInitialDelayMs: 500,
   reconnectMaxDelayMs: 10_000,
@@ -153,11 +156,22 @@ export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
 export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
   { value: 'off', label: '关闭' },
   { value: 'auto', label: '自动' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'xhigh', label: '超高' },
+  { value: 'minimal', label: 'minimal' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
 ]
+
+/**
+ * 合法的档位值集合。
+ *
+ * 1.5.4o4：持久化的档位必须按「完整取值表」校验。原来用 REASONING_EFFORTS 校验，
+ * 而那张表当时只列到 xhigh —— 用户选了 max / minimal，重启后就被判成非法、
+ * 悄悄退回 auto，界面上看就是「选完了却没生效 / 说切不了」。
+ */
+export const REASONING_EFFORT_VALUES: string[] = REASONING_EFFORTS.map(item => item.value)
 
 /** 强度值 → 中文字面。模型声明里可能出现的每一种都要能显示。 */
 /**
@@ -232,12 +246,13 @@ export const useConfigStore = defineStore('config', () => {
   const minimalUi = ref(localStorage.getItem('coomi.minimalUi') === '1')
   const themeMode = ref<ThemeMode>(readThemeMode())
   const savedEffort = localStorage.getItem('coomi.reasoningEffort') as ReasoningEffort | null
-  const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORTS.some(item => item.value === savedEffort) ? savedEffort! : 'auto')
+  const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORT_VALUES.includes(savedEffort ?? '') ? savedEffort! : 'auto')
   const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
   const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
   const subAgentSettings = ref<SubAgentSettings>({ agents: [], maxAgents: 20 })
   const connectionSettings = ref<ConnectionSettings>({
     providerRetryCount: readStoredInt('coomi.providerRetryCount', 0, 10, DEFAULT_CONNECTION_SETTINGS.providerRetryCount),
+    retryForever: localStorage.getItem('coomi.retryForever') === '1',
     wsRetryCount: readStoredInt('coomi.wsRetryCount', 0, 100, DEFAULT_CONNECTION_SETTINGS.wsRetryCount),
     reconnectInitialDelayMs: readStoredInt('coomi.reconnectInitialDelayMs', 500, 60_000, DEFAULT_CONNECTION_SETTINGS.reconnectInitialDelayMs),
     reconnectMaxDelayMs: readStoredInt('coomi.reconnectMaxDelayMs', 1_000, 120_000, DEFAULT_CONNECTION_SETTINGS.reconnectMaxDelayMs),
@@ -315,6 +330,7 @@ export const useConfigStore = defineStore('config', () => {
   function cacheConnectionSettings(value: ConnectionSettings) {
     connectionSettings.value = { ...value }
     localStorage.setItem('coomi.providerRetryCount', String(value.providerRetryCount))
+    localStorage.setItem('coomi.retryForever', value.retryForever ? '1' : '0')
     localStorage.setItem('coomi.wsRetryCount', String(value.wsRetryCount))
     localStorage.setItem('coomi.reconnectInitialDelayMs', String(value.reconnectInitialDelayMs))
     localStorage.setItem('coomi.reconnectMaxDelayMs', String(value.reconnectMaxDelayMs))
@@ -334,6 +350,7 @@ export const useConfigStore = defineStore('config', () => {
   async function saveConnectionSettings(value: ConnectionSettings): Promise<boolean> {
     const normalized: ConnectionSettings = {
       providerRetryCount: Math.trunc(value.providerRetryCount),
+      retryForever: Boolean(value.retryForever),
       wsRetryCount: Math.trunc(value.wsRetryCount),
       reconnectInitialDelayMs: Math.trunc(value.reconnectInitialDelayMs),
       reconnectMaxDelayMs: Math.trunc(value.reconnectMaxDelayMs),

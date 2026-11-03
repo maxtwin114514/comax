@@ -1432,7 +1432,13 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                         format!("Continuing tool loop, round {round}")
                     };
                 }
-                AgentEvent::ConnectionRetry { message, .. } => app.status = message,
+                AgentEvent::ConnectionRetry { message, code, .. } => {
+                    app.status = if code.is_empty() {
+                        message
+                    } else {
+                        format!("{message} [{code}]")
+                    }
+                }
                 AgentEvent::StreamReset => {
                     app.status = "Discarding interrupted partial response".into()
                 }

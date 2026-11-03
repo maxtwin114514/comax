@@ -36,8 +36,10 @@ function resetConnectionSettings() {
 async function saveConnectionSettings() {
   connectionError.value = ''
   connectionSaved.value = false
-  if (!Number.isInteger(connectionDraft.value.providerRetryCount)
-    || connectionDraft.value.providerRetryCount < 0 || connectionDraft.value.providerRetryCount > 10) {
+  // 无限重试开启时次数不生效，跳过校验（否则用户填了个残留的 11 就存不下去）。
+  if (!connectionDraft.value.retryForever
+    && (!Number.isInteger(connectionDraft.value.providerRetryCount)
+      || connectionDraft.value.providerRetryCount < 0 || connectionDraft.value.providerRetryCount > 10)) {
     connectionError.value = '模型重试次数需为 0 - 10 的整数'
     return
   }
@@ -299,9 +301,17 @@ onMounted(async () => {
 
       <p class="sec-label">连接、重试与并发</p>
       <div class="group numeric-settings">
-        <label class="number-row">
-          <span class="rt"><span class="rmain">模型重试次数</span><span class="rsub">瞬时网络或上游故障，0 表示禁用</span></span>
-          <input v-model.number="connectionDraft.providerRetryCount" type="number" min="0" max="10" step="1" inputmode="numeric" aria-label="模型重试次数" />
+        <button class="row" type="button" @click="connectionDraft.retryForever = !connectionDraft.retryForever">
+          <span class="ri" :class="{ on: connectionDraft.retryForever }"><CoomiIcon name="refresh" :size="17" /></span>
+          <span class="rt">
+            <span class="rmain">无限重试</span>
+            <span class="rsub">开启后不管报什么错都会一直重试（重试提示旁会显示报错代码），只有点停止才中断</span>
+          </span>
+          <span class="sw" :class="{ on: connectionDraft.retryForever }" />
+        </button>
+        <label class="number-row" :class="{ disabled: connectionDraft.retryForever }">
+          <span class="rt"><span class="rmain">模型重试次数</span><span class="rsub">{{ connectionDraft.retryForever ? '无限重试已开启，此项不生效' : '瞬时网络或上游故障，0 表示禁用' }}</span></span>
+          <input v-model.number="connectionDraft.providerRetryCount" type="number" min="0" max="10" step="1" inputmode="numeric" :disabled="connectionDraft.retryForever" aria-label="模型重试次数" />
         </label>
         <label class="number-row">
           <span class="rt"><span class="rmain">会话并发数</span><span class="rsub">同时运行的会话任务，重启引擎后生效</span></span>
@@ -460,6 +470,8 @@ onMounted(async () => {
 .theme-options .row:disabled:active { background: var(--bg); }
 .number-row { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 13px; }
 .number-row + .number-row { border-top: 1px solid var(--border); }
+.number-row.disabled { opacity: .55; }
+.number-row.disabled input { background: var(--fill); color: var(--text-3); }
 .number-row input { width: 92px; height: 38px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--page); color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
 .settings-actions { display: flex; align-items: center; gap: 8px; min-height: 50px; padding: 8px 12px; border-top: 1px solid var(--border); }
 .save-state { flex: 1; min-width: 0; font-size: 12px; color: var(--ok); }

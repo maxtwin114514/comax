@@ -66,6 +66,8 @@ pub struct Agent {
     system_prompt: String,
     max_tool_rounds: usize,
     provider_retry_count: u8,
+    /// 无限重试（1.5.4o5 第 4 项）：不管哪一类错误都重试，只有在用户取消时停。
+    retry_forever: bool,
     reconnect_initial_delay_ms: u64,
     reconnect_max_delay_ms: u64,
     max_parallel_tools: usize,
@@ -92,6 +94,7 @@ impl Agent {
             system_prompt: system_prompt.into(),
             max_tool_rounds: 192,
             provider_retry_count: 2,
+            retry_forever: false,
             reconnect_initial_delay_ms: 1_000,
             reconnect_max_delay_ms: 10_000,
             max_parallel_tools: 5,
@@ -167,6 +170,13 @@ impl Agent {
         self
     }
 
+    /// 无限重试：开启后**任何**错误都会重试（包括 4xx / 参数错误 / 鉴权错误），
+    /// 只有用户点停止才会中断。用户原话：「不管报啥错都进行重试」。
+    pub fn with_retry_forever(mut self, retry_forever: bool) -> Self {
+        self.retry_forever = retry_forever;
+        self
+    }
+
     pub fn with_max_parallel_tools(mut self, max_parallel_tools: usize) -> Self {
         self.max_parallel_tools = max_parallel_tools.clamp(1, 16);
         self
@@ -210,6 +220,32 @@ impl Agent {
             observer,
         )
         .await
+    }
+
+    /// 带附件的用户消息（1.5.5）。
+    ///
+    /// 用户拖进来的图片必须真的进请求，而不是被塞成一行「请读取这些已导入文件」。
+    /// 图片走 `ChatMessage::images`，provider 侧按各自协议转成
+    /// `image_url` / `input_image` / `image` / `inlineData`。
+    pub async fn run_turn_with_images(
+        &self,
+        session: &mut Session,
+        prompt: impl Into<String>,
+        images: Vec<(String, Vec<u8>)>,
+        provider: &dyn ModelProvider,
+        tools: &dyn ToolRuntime,
+        approval: &dyn ApprovalHandler,
+        observer: &dyn AgentObserver,
+    ) -> Result<String, AgentError> {
+        let mut message = ChatMessage::user(prompt);
+        for (media_type, bytes) in images {
+            message.images.push(crate::types::ImageContent {
+                media_type,
+                data: encode_base64(&bytes),
+            });
+        }
+        self.run_accounted_turn(session, message, provider, tools, approval, observer)
+            .await
     }
 
     /// Resume an interrupted turn without presenting the recovery instruction as a
@@ -487,25 +523,32 @@ impl Agent {
                             max_attempts: 1,
                             delay_ms: 0,
                             message: "当前模型拒绝图片内容，正在切换为纯文本恢复".into(),
+                            code: "image_rejected".into(),
                         });
                     }
                     Err(error)
-                        if retry_attempt < self.provider_retry_count
-                            && is_transient_provider_error(&error) =>
+                        if should_retry(&error, retry_attempt, self.provider_retry_count, self.retry_forever) =>
                     {
-                        retry_attempt += 1;
+                        retry_attempt = retry_attempt.saturating_add(1);
                         let delay_ms = retry_delay_ms(
                             &error,
                             retry_attempt,
                             self.reconnect_initial_delay_ms,
                             self.reconnect_max_delay_ms,
                         );
+                        let code = error_code(&error);
                         observer.on_event(&AgentEvent::StreamReset);
                         observer.on_event(&AgentEvent::ConnectionRetry {
                             attempt: retry_attempt,
-                            max_attempts: self.provider_retry_count,
+                            // 0 = 无限重试，前端据此显示「第 N 次 / 无限」
+                            max_attempts: if self.retry_forever { 0 } else { self.provider_retry_count },
                             delay_ms,
-                            message: "网络或上游服务暂时不可用，正在自动恢复".into(),
+                            message: if self.retry_forever {
+                                "任务出错，按「无限重试」设置正在自动重试".to_string()
+                            } else {
+                                "网络或上游服务暂时不可用，正在自动恢复".to_string()
+                            },
+                            code,
                         });
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
@@ -860,6 +903,35 @@ fn tool_correction_problem(call: &crate::InvalidToolCall, specs: &[crate::ToolSp
     )
 }
 
+/// 最小 base64 编码（标准字母表 + `=` padding）。
+///
+/// 只为了不把 `base64` crate 加进 engine 的依赖：这里每轮最多编码几张几百 KB
+/// 的图片，自己实现足够快，也避免 engine 包多一个外部依赖。
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) as usize & 0x3f] as char);
+        out.push(TABLE[(triple >> 12) as usize & 0x3f] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(triple >> 6) as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[triple as usize & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 fn truncate_chars(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_owned();
@@ -909,6 +981,61 @@ fn tool_retry_block_reason(previous: ToolFailureState, repeated_in_batch: bool) 
         return "相同工具与参数此前因权限、策略、参数或路径问题失败，已阻止原样重试；请修改参数、路径或改用其他工具。".into();
     }
     "相同工具与参数已达到最多一次重试上限，已阻止继续执行；请修改参数或切换工具。".into()
+}
+
+/// 报错代码（1.5.4o5 第 4 项）：重试提示旁边要显示它，用户才知道到底在重试什么。
+///
+/// 优先用上游给的 HTTP 状态码；没有状态码时按错误类型给一个短标签。
+/// 只做展示，不参与判定 —— 判定仍然看 `retryable` 标志。
+fn error_code(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<ProviderRequestError>() {
+        if let Some(status) = error.status {
+            return format!("HTTP {status}");
+        }
+        return format!("{:?}", error.kind);
+    }
+    let text = error.to_string();
+    let lower = text.to_ascii_lowercase();
+    if let Some(index) = lower.find("status=") {
+        let digits: String = lower[index + 7..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return format!("HTTP {digits}");
+        }
+    }
+    for (needle, label) in [
+        ("timed out", "Timeout"),
+        ("timeout", "Timeout"),
+        ("dns", "DNS"),
+        ("broken pipe", "BrokenPipe"),
+        ("reset", "ConnectionReset"),
+        ("stream failed", "Stream"),
+        ("tls", "TLS"),
+    ] {
+        if lower.contains(needle) {
+            return label.to_string();
+        }
+    }
+    "Error".to_string()
+}
+
+/// 该不该重试。
+///
+/// 普通模式：只重试瞬时故障，且不超过配置次数（原有行为，保持不变）。
+/// 无限重试模式（1.5.4o5 第 4 项）：**任何**错误都重试 —— 包括 4xx、参数错误、
+/// 鉴权失败。用户明确要求「不管报啥错都进行重试」，唯一的出口是点停止。
+fn should_retry(
+    error: &anyhow::Error,
+    attempts_so_far: u8,
+    limit: u8,
+    retry_forever: bool,
+) -> bool {
+    if retry_forever {
+        return true;
+    }
+    attempts_so_far < limit && is_transient_provider_error(error)
 }
 
 fn is_transient_provider_error(error: &anyhow::Error) -> bool {

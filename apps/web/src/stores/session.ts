@@ -54,7 +54,11 @@ export const useSessionStore = defineStore('session', () => {
     reasoningEfforts: Partial<Record<ReasoningEffort, ReasoningEffortStats>>
     contextCategories: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
   } | null>(null)
-  const retryConfirmation = ref<string | null>(null)
+  /**
+   * 重试确认弹层（1.5.4o5 第 4/5 项）。
+   * 从纯字符串改成对象：要带上「报错代码」一起显示，还要能区分是不是工具上限。
+   */
+  const retryConfirmation = ref<{ message: string; code: string; detail?: string } | null>(null)
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
@@ -130,6 +134,9 @@ export const useSessionStore = defineStore('session', () => {
   let consecutiveToolFailures = 0
   let maxConsecutiveToolFailures = 0
   let failureNoticeCreated = false
+  /** 正在停止（乐观反馈）：点停止后立刻为 true，收到引擎事件或超时后回落。 */
+  const cancelling = ref(false)
+  let cancelTimer: ReturnType<typeof setTimeout> | null = null
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
@@ -327,29 +334,53 @@ export const useSessionStore = defineStore('session', () => {
       case 'tool_start':
         connection.setRetry(null)
         endAssistantStream()
-        timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
+        // 同一次调用重复收到 tool_start（重连补发 / 引擎续轮）时不要新建卡片：
+        // 旧卡片会永远停在「准备」，用户看到的就是「工具已经结束了还在转」。
+        if (!patchTool(ev.call_id, c => {
+          c.status = 'starting'
+          if (ev.tool_name) c.toolName = ev.tool_name
+          if (ev.arguments) c.arguments = ev.arguments
+        })) {
+          timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
+        }
         setControlLine(`正在调用 ${ev.tool_name}`)
         // summarizeArguments 返回的是结构化的摘要对象，转发给悬浮层要转成一行文字
         pushTrace(`调用工具 ${ev.tool_name}`, describeFloatArguments(ev.arguments))
-        turnToolTrace.push({
-          callId: ev.call_id,
-          sequence: turnToolTrace.length + 1,
-          tool: sanitizeToolName(ev.tool_name),
-          argumentShape: summarizeArguments(ev.arguments),
-          status: 'running',
-        })
+        if (!turnToolTrace.some(item => item.callId === ev.call_id)) {
+          turnToolTrace.push({
+            callId: ev.call_id,
+            sequence: turnToolTrace.length + 1,
+            tool: sanitizeToolName(ev.tool_name),
+            argumentShape: summarizeArguments(ev.arguments),
+            status: 'running',
+          })
+        }
         runState.value = 'executing'
         break
       case 'tool_running': patchTool(ev.call_id, c => c.status = 'running'); runState.value = 'executing'; break
       case 'tool_done':
-        patchTool(ev.call_id, c => {
+        // 卡片丢了（历史恢复/重连把时间线替换掉）也不能让结果凭空消失：
+        // patchTool 返回 false 时补一张已完成的卡片，状态直接是终态。
+        if (!patchTool(ev.call_id, c => {
           c.status = ev.is_error ? 'error' : 'success'
           c.elapsed = ev.elapsed
           c.resultPreview = ev.result_preview
           c.isError = ev.is_error
           // 工具产生的图片：瀑布流渲染（历史恢复时由 messages.images 补回）
           if (Array.isArray(ev.images) && ev.images.length > 0) c.images = ev.images
-        })
+        })) {
+          timeline.value.push({
+            kind: 'tool',
+            callId: ev.call_id,
+            toolName: ev.tool_name,
+            arguments: {},
+            status: ev.is_error ? 'error' : 'success',
+            elapsed: ev.elapsed,
+            resultPreview: ev.result_preview,
+            isError: ev.is_error,
+            images: Array.isArray(ev.images) && ev.images.length > 0 ? ev.images : undefined,
+          })
+        }
         // 控制模式：工具结果也送到悬浮层。用户切到目标 App 后，这是唯一能看到
         // 「它刚才做的事成没成」的地方。
         pushTrace(
@@ -453,7 +484,14 @@ export const useSessionStore = defineStore('session', () => {
               )
               break
             }
-      case 'connection_retry': connection.setRetry(`${ev.message}（${ev.attempt}/${ev.max_attempts}）`); break
+      case 'connection_retry': {
+        // 1.5.4o5 第 4 项：重试提示旁边要显示报错代码。
+        // max_attempts = 0 表示「无限重试」，不能显示成「1/0」。
+        const progress = ev.max_attempts > 0 ? `${ev.attempt}/${ev.max_attempts}` : `第 ${ev.attempt} 次 · 无限`
+        const code = ev.code || errorCodeFromText(ev.message)
+        connection.setRetry(`${ev.message}（${progress}）[${code}]`)
+        break
+      }
       case 'stream_reset':
         endAssistantStream()
         while (timeline.value.length > 0) {
@@ -465,7 +503,11 @@ export const useSessionStore = defineStore('session', () => {
       case 'retry_confirmation':
         endAssistantStream()
         runState.value = 'idle'
-        retryConfirmation.value = ev.message
+        retryConfirmation.value = {
+          message: ev.message,
+          code: ev.code || errorCodeFromText(ev.detail || ev.message),
+          detail: ev.detail,
+        }
         break
       case 'agent_error': {
         endAssistantStream(); pushNotice('error', ev.message); if (ev.is_fatal) runState.value = 'idle'; persistSoon()
@@ -476,7 +518,15 @@ export const useSessionStore = defineStore('session', () => {
         break
       }
       case 'configuration_required': endAssistantStream(); runState.value = 'idle'; pushNotice('warn', ev.message); void router.push(ev.route); break
-      case 'agent_cancelled': endAssistantStream(); cancelRunningTools(); pushNotice('warn', '已停止本轮执行'); break
+      case 'agent_cancelled': {
+        if (cancelTimer) { clearTimeout(cancelTimer); cancelTimer = null }
+        cancelling.value = false
+        // 乐观收尾已经跑过（runState 已 idle）就不再补一条提示，避免一次停止弹两次。
+        const alreadySettled = runState.value === 'idle'
+        endAssistantStream(); cancelRunningTools()
+        if (!alreadySettled) pushNotice('warn', '已停止本轮执行')
+        break
+      }
       case 'bg_task_detached': pushNotice('info', `↪ 已转入后台任务 #${ev.task_id}（${ev.tool_name}）`); break
       case 'bg_task_completed': pushNotice(ev.is_error ? 'error' : 'success', `${ev.is_error ? '✕' : '✓'} 后台任务 #${ev.task_id} ${ev.is_error ? '失败' : '完成'}`); break
       case 'loop_progress':
@@ -500,7 +550,11 @@ export const useSessionStore = defineStore('session', () => {
         // 正常 turn_end 不是取消事件。工具状态只能由 tool_done / tool_cache_hit
         // 收尾；把“尚未收到结果”统一改成已取消会制造假状态。
         endAssistantStream(); connection.setRetry(null); runState.value = 'idle'
+        if (cancelTimer) { clearTimeout(cancelTimer); cancelTimer = null }
+        cancelling.value = false
         plan.value = { active: false, steps: [] }
+        // 悬浮层状态行也要收尾：否则控制模式里最后一句会永远停在「正在调用 xxx」。
+        pushControlStatus('本轮已完成')
         {
           const failures = turnToolTrace.filter(item => item.status === 'error').length
           if (maxConsecutiveToolFailures >= 3 && !failureNoticeCreated) {
@@ -516,14 +570,33 @@ export const useSessionStore = defineStore('session', () => {
         consecutiveToolFailures = 0
         maxConsecutiveToolFailures = 0
         failureNoticeCreated = false
-        // 回复完成：强制触发一次置底刷新。
+        /**
+         * 1.5.4o4 第 6 项：工具已经结束，卡片还显示「正在调用」。
+         *
+         * 正常路径下每张卡片都会被 tool_done / tool_cache_hit 收尾。但重连补发、
+         * 事件序号去重、历史恢复替换时间线这几种情况都可能让某张卡片永远停在
+         * running/starting。turn_end 是「这一轮真的结束了」的权威信号：
+         * 此时仍非终态的卡片一定是丢了结果事件，统一收成「未返回结果」，
+         * 而不是继续转圈骗用户。
+         */
+        {
+          let settled = 0
+          for (const item of timeline.value) {
+            if (item.kind === 'tool' && (item.status === 'running' || item.status === 'starting')) {
+              item.status = 'cancelled'
+              item.isError = true
+              if (!item.resultPreview) item.resultPreview = '本轮已结束，未收到该工具的返回结果'
+              settled += 1
+            }
+          }
+          if (settled > 0) persistSoon()
+        }
+        // 「回复完成」不再用 viewRevision 强制置底。
         //
-        // 有概率"回复完就锁死在半空"：最后一段内容是工具卡，它在 turn_end 前后
-        // 还会变高（结果展开/耗时补齐）。DynamicScroller 重新测量行高时会写 scrollTop，
-        // 这个写入被 useAutoScroll 的 onScroll 当成了"用户在滚"，距离底部一超过 40px
-        // 就把 following 置 false —— 之后再也不跟随，用户看到的就是卡在半空。
-        // 这里递增 viewRevision，ChatView 的 watch 会无条件 following = true 并置底一次。
-        viewRevision.value += 1
+        // 原来这里递增 viewRevision，ChatView 的 watch 会 following = true + jumpToBottom，
+        // 于是**用户往上翻看历史时，一收到 turn_end 就被拽回底部**（1.5.4o4 第 3 项），
+        // 而且跳转发生在内容还没停止增长的瞬间，就成了「锁死在半空」的另一种来源。
+        // 现在改由 ChatView 监听 runState 回到 idle，只做一次 follow（跟随态才生效）。
         persistSoon()
         break
       case 'session_state': {
@@ -663,7 +736,7 @@ export const useSessionStore = defineStore('session', () => {
     if (isBusy.value) {
       const id = nextId()
       timeline.value.push({ kind: 'user', id, mid: '', content: visible, attachments, morphing: morph })
-      transport.value?.send({ command: 'jump_in', text: trimmed })
+      transport.value?.send({ command: 'jump_in', text: trimmed, images: imagePaths(attachments) })
       persistSoon()
       return id
     }
@@ -672,7 +745,12 @@ export const useSessionStore = defineStore('session', () => {
     timeline.value.push({ kind: 'user', id, mid: '', content: visible, attachments, morphing: morph })
     runState.value = 'thinking'
     // 直接发送；如遇 3007 需验证码，引擎发 captcha_required 事件，前端跳转验证页处理
-    transport.value?.send({ command: 'send_message', text: trimmed })
+    //
+    // 1.5.5：把附件里的**图片路径**一并发出去（不是只塞进文本）。
+    // 引擎读文件后按各自协议转成 image_url / input_image / image / inlineData，
+    // 视觉模型才真的"看得见"；只发一行「请读取这些文件」时模型只能调 OCR，
+    // 而 OCR 只认字 —— 这就是「OCR 只能提取文字、截图识别不了」的直接原因。
+    transport.value?.send({ command: 'send_message', text: trimmed, images: imagePaths(attachments) })
     persistSoon()
     return id
   }
@@ -685,7 +763,30 @@ export const useSessionStore = defineStore('session', () => {
     setTimeout(() => { message.morphArrived = false }, 1100)
   }
 
-  function cancel() { transport.value?.send({ command: 'cancel' }) }
+  /**
+   * 停止（1.5.4o5 第 6 项）。
+   *
+   * 「点了停止要等一会才停」有两个来源：引擎侧把 terminate_all 放在了推事件之前
+   * （已改，见 stop_session_task），以及前端在等 agent_cancelled 才更新界面。
+   * 这里补上乐观反馈：立刻置「正在停止」，并在 420ms 内没等到引擎事件时
+   * 直接按已停止收尾 —— 用户按下就得有反应，剩下的清理让引擎在后台做完。
+   */
+  function cancel() {
+    transport.value?.send({ command: 'cancel' })
+    cancelling.value = true
+    endAssistantStream()
+    cancelRunningTools()
+    pushControlStatus('正在停止')
+    if (cancelTimer) clearTimeout(cancelTimer)
+    cancelTimer = setTimeout(() => {
+      cancelTimer = null
+      if (!cancelling.value) return
+      // 引擎还没回话：先把界面收干净，别让按钮一直转着等。
+      cancelling.value = false
+      runState.value = 'idle'
+      plan.value = { active: false, steps: [] }
+    }, 420)
+  }
   function approve(callId: string, decision: 'allow' | 'deny' | 'always') {
     patchTool(callId, c => { c.status = decision === 'deny' ? 'error' : 'running'; if (decision === 'deny') { c.resultPreview = '（用户拒绝执行）'; c.isError = true } })
     transport.value?.send({ command: 'approve_tool', call_id: callId, decision })
@@ -1059,8 +1160,40 @@ export const useSessionStore = defineStore('session', () => {
 
   function toggleLifeStats() { lifeStatsOpen.value = !lifeStatsOpen.value }
 
-  return { sessionId, mode, timeline, viewRevision, restoring, runState, usage, plan, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, restoreFromEngine, resumeFromBackground, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
+  return { sessionId, mode, timeline, viewRevision, restoring, runState, usage, plan, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, cancelling, lifeUnread, lifeUnreadName, lifeStatsOpen, toggleLifeStats, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, completeSendMorph, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setProductionMode, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, restoreFromEngine, resumeFromBackground, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide }
 })
+
+/**
+ * 从引擎错误文本里提取报错代码（1.5.4o5 第 4 项）。
+ *
+ * 引擎优先直接给 `code` 字段；老引擎只给 detail 文本，这里兜底解析
+ * `status=429` / `kind=Timeout` 这类片段，保证界面上总有东西可显示。
+ */
+/** 附件里属于图片的那些路径（引擎侧只把这些当多模态内容，其余仍走文本读取）。 */
+const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp)$/i
+function imagePaths(attachments?: readonly string[]): string[] {
+  return (attachments ?? []).filter(path => IMAGE_EXT.test(path))
+}
+
+function errorCodeFromText(text: string): string {
+  const lower = text.toLowerCase()
+  const status = lower.match(/status=(\d{3})/)
+  if (status) return `HTTP ${status[1]}`
+  const kind = text.match(/kind=(\w+)/)
+  if (kind) return kind[1]
+  for (const [needle, label] of [
+    ['timed out', 'Timeout'],
+    ['timeout', 'Timeout'],
+    ['dns', 'DNS'],
+    ['broken pipe', 'BrokenPipe'],
+    ['reset', 'ConnectionReset'],
+    ['stream failed', 'Stream'],
+    ['tls', 'TLS'],
+  ] as const) {
+    if (lower.includes(needle)) return label
+  }
+  return 'Error'
+}
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
 

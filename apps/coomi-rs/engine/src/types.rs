@@ -1000,9 +1000,12 @@ pub enum AgentEvent {
     },
     ConnectionRetry {
         attempt: u8,
+        /// 0 表示无限重试（1.5.4o5 第 4 项：设置里的「无限重试」开关）。
         max_attempts: u8,
         delay_ms: u64,
         message: String,
+        /// 报错代码（`HTTP 429` / `Timeout` / …），前端在重试提示旁边显示。
+        code: String,
     },
     /// Discard partial stream output before retrying the same model request.
     StreamReset,

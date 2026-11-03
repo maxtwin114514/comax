@@ -12,9 +12,15 @@ export type ApprovalDecision = 'allow' | 'deny' | 'always'
 export type ReasoningEffort = 'off' | 'auto' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type SessionMode = 'agent' | 'life'
 
-export interface SendMessageCommand { command: 'send_message'; text: string }
+/**
+ * 发送一条用户消息。
+ *
+ * `images`（1.5.5）：随消息一起发出去的图片绝对路径。引擎会读文件并把它们
+ * 作为真正的多模态内容塞进请求 —— 只发路径文本的话模型根本看不到画面。
+ */
+export interface SendMessageCommand { command: 'send_message'; text: string; images?: string[] }
 export interface CancelCommand { command: 'cancel' }
-export interface JumpInCommand { command: 'jump_in'; text: string }
+export interface JumpInCommand { command: 'jump_in'; text: string; images?: string[] }
 export interface ApproveToolCommand { command: 'approve_tool'; call_id: string; decision: ApprovalDecision }
 export interface AnswerQuestionCommand { command: 'answer_question'; call_id: string; answers: Record<string, string> }
 export interface SetPermissionModeCommand { command: 'set_permission_mode'; mode: PermissionMode }

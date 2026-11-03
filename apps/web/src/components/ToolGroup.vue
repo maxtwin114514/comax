@@ -114,8 +114,15 @@ const miniLabel = computed(() => {
 .gchev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
 .gchev.open { transform: rotate(90deg); }
 
-.group-content { display:grid; overflow:hidden; }
+/* 展开/收起：grid-template-rows 0fr ↔ 1fr。
+   1.5.4o5 第 8 项：旧版给 .glist 补间 max-height(0 → 4800px)，浏览器每帧都要
+   重排整条消息流，而且 4800px 这种量级会让缓动严重失真（前半程几乎不动、后半程
+   猛跳），观感就是"卡"。行轨道补间只影响这一块，且不需要量高度。 */
+.group-content { display:grid; grid-template-rows: 1fr; overflow:hidden; transition: grid-template-rows .24s cubic-bezier(.22,.68,.19,1); }
+.group-content.open { grid-template-rows: 1fr; }
+.group-content:not(.open) { grid-template-rows: 0fr; }
 .group-content > * { grid-area:1 / 1; min-width:0; }
+.group-content > .glist { min-height: 0; }
 .peek { display:flex; align-items:center; gap:5px; padding:0 11px 10px; opacity:1; transition:opacity .14s ease; }
 .group-content.open .peek { opacity:0; pointer-events:none; }
 .pchip {
@@ -127,11 +134,11 @@ const miniLabel = computed(() => {
 
 .glist {
   display:flex; flex-direction:column; gap:7px; padding:0 7px;
-  max-height:0; opacity:0; transform:translateY(-4px); overflow:hidden;
-  pointer-events:none; will-change:max-height,opacity,transform;
-  transition:max-height .28s cubic-bezier(.22,.68,.19,1), opacity .18s ease, transform .22s ease, padding-bottom .22s ease;
+  overflow:hidden; pointer-events:none;
+  opacity:0;
+  transition: opacity .16s ease;
 }
-.group-content.open .glist { max-height:4800px; padding-bottom:8px; opacity:1; transform:none; pointer-events:auto; }
+.group-content.open .glist { padding-bottom:8px; opacity:1; pointer-events:auto; }
 
 /* ── 极简界面模式：工具调用折叠成一小块方框 ── */
 .mini-tool {

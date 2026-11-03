@@ -30,6 +30,8 @@ interface ProviderDraft {
   protocol: ProviderProtocol
   contextWindow: number
   supportsWebSearch: boolean
+  /** 顶层视觉开关（1.5.5）：任一模型勾了「视觉」或按模型名命中时为 true。 */
+  supportsVision: boolean
   modelDescriptions: Record<string, string>
   modelParameters: Record<string, ModelParameters>
   capabilityOverrides: Record<string, CapabilityOverride>
@@ -129,6 +131,7 @@ function emptyDraft(id = '', name = ''): ProviderDraft {
     protocol: preset?.protocol || 'openai_compatible',
     contextWindow: 256000,
     supportsWebSearch: false,
+    supportsVision: false,
     modelDescriptions: {}, modelParameters: {}, capabilityOverrides: {},
   }
 }
@@ -147,9 +150,27 @@ function draftFromProvider(value: ProviderConfig | null): ProviderDraft {
     protocol: normalizeProtocol(value.toolProtocol || value.type),
     contextWindow: value.contextWindow || 256000,
     supportsWebSearch: !!value.supportsWebSearch,
+    supportsVision: !!value.supportsVision,
     modelDescriptions: { ...(value.modelDescriptions ?? {}) }, modelParameters: { ...(value.modelParameters ?? {}) },
-    capabilityOverrides: { ...(value.capabilityOverrides ?? {}) },
+    // 1.5.5：加载时丢掉「旧版本自动写进去的全默认 override」。
+    //
+    // 旧版保存 provider 时无条件给每个模型补一条
+    // `{ text: true, vision: false, image_generation: false }`，于是 providers.json 里
+    // 满屏 false ——「图像理解」页签永远为空，模型也一直被当作文本模型。
+    // 只有三项**恰好等于默认值**时才丢；用户真的改过任何一项都保留。
+    capabilityOverrides: Object.fromEntries(
+      Object.entries(value.capabilityOverrides ?? {})
+        .filter(([, entry]) => isMeaningfulOverride(entry)),
+    ),
   }
+}
+
+/** 这条 override 是不是用户真改过的（而不是旧版自动补的默认值）。 */
+function isMeaningfulOverride(entry: CapabilityOverride): boolean {
+  if (entry.text === false) return true
+  if (entry.vision === true) return true
+  if (entry.image_generation === true) return true
+  return false
 }
 
 function clone(value: ProviderDraft): ProviderDraft {
@@ -175,10 +196,37 @@ function modelContextSelection(model: string): string {
   return CONTEXT_WINDOW_PRESETS.includes(value) ? String(value) : 'custom'
 }
 
+/**
+ * 某个模型是否具备某项能力。
+ *
+ * 1.5.5：`vision` 的默认值不再恒为 false —— 否则「图像理解」页签永远是空的，
+ * 用户既看不到自己的视觉模型，也没法勾。默认规则：
+ *   · 显式 override 有值 → 用它；
+ *   · vision → 沿用顶层 supportsVision，或按模型名做保守推断（与引擎同一套思路）；
+ *   · text → 默认 true。
+ */
+const VISION_NAME_HINTS = [
+  'vision', '-vl', 'vl-', '/vl', 'vlm',
+  'gpt-4o', 'gpt-4.1', 'gpt-5', 'gpt-6', 'o3', 'o4-mini',
+  'claude', 'gemini',
+  'glm-4v', 'glm-5v', 'glm-4.5v',
+  'pixtral', 'internvl', 'minicpm-v', 'llava',
+  'qwen2-vl', 'qwen2.5-vl', 'qwen3-vl',
+  'step-1v', 'step-2v', 'doubao-vision',
+  'multimodal', 'omni',
+]
+
+function looksLikeVisionModel(model: string): boolean {
+  const name = model.toLowerCase()
+  return VISION_NAME_HINTS.some(hint => name.includes(hint))
+}
+
 function capabilityEnabled(model: string, key: 'text' | 'vision' | 'image_generation'): boolean {
   const override = draft.value?.capabilityOverrides[model]?.[key]
   if (override !== undefined) return override
-  return key === 'text'
+  if (key === 'text') return true
+  if (key === 'vision') return Boolean(draft.value?.supportsVision) || looksLikeVisionModel(model)
+  return false
 }
 const visibleModels = computed(() => {
   if (!draft.value) return []
@@ -374,14 +422,29 @@ function discardAndBack() {
 }
 
 function providerInput(value: ProviderDraft): ProviderInput {
-  const capabilityOverrides = { ...value.capabilityOverrides }
+  /**
+   * capabilityOverrides 只保存**用户真的改过**的模型（1.5.5）。
+   *
+   * 旧版无条件给每个模型补一条 `vision: false` —— 引擎读不到 true 就按这个 false
+   * 判定，于是所有模型（包括 gpt-5 / claude / gemini）都被当作文本模型，
+   * 图片在请求组装阶段就被静默丢掉。现在：
+   *   · 没改过的模型完全不写 override，交给引擎按顶层开关 + 模型名推断；
+   *   · 顶层 `supportsVision` 由「图像理解」页签的勾选汇总而来。
+   */
+  const capabilityOverrides: Record<string, CapabilityOverride> = {}
   for (const model of value.models) {
-    capabilityOverrides[model] = {
-      text: capabilityOverrides[model]?.text ?? true,
-      vision: capabilityOverrides[model]?.vision ?? false,
-      image_generation: capabilityOverrides[model]?.image_generation ?? false,
+    const existing = value.capabilityOverrides[model]
+    if (!existing) continue
+    const entry: CapabilityOverride = {
+      text: existing.text ?? true,
+      vision: existing.vision ?? false,
+      image_generation: existing.image_generation ?? false,
     }
+    // 全 false 且用户从没碰过 → 视为"无自定义"，不落盘。
+    if (entry.text && !entry.vision && !entry.image_generation) continue
+    capabilityOverrides[model] = entry
   }
+  const anyVision = value.models.some(model => capabilityOverrides[model]?.vision === true)
   return {
     id: value.id.trim(),
     name: value.name.trim(),
@@ -396,6 +459,10 @@ function providerInput(value: ProviderDraft): ProviderInput {
       ? Math.max(32, Math.min(1048, Math.round(customContextWindow.value || 64))) * 1000
       : value.contextWindow,
     supportsWebSearch: value.supportsWebSearch,
+    // 顶层视觉开关跟着勾选汇总走：只要有一个模型勾了「视觉」就打开。
+    // 没勾的模型不写 override，留给引擎按模型名推断（gpt-5 / claude / gemini…），
+    // 所以这里不能用 anyVision === false 去把顶层关死。
+    supportsVision: anyVision || value.supportsVision,
     modelDescriptions: { ...value.modelDescriptions }, modelParameters: { ...value.modelParameters }, capabilityOverrides,
     activate: false,
   }

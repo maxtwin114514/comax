@@ -1451,6 +1451,9 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 #[serde(rename_all = "camelCase")]
 struct ConnectionSettings {
     provider_retry_count: u8,
+    /// 无限重试（1.5.4o5 第 4 项）：不管报什么错都重试，直到用户点停止。
+    #[serde(default)]
+    retry_forever: bool,
     ws_retry_count: u8,
     reconnect_initial_delay_ms: u64,
     reconnect_max_delay_ms: u64,
@@ -1466,6 +1469,7 @@ impl Default for ConnectionSettings {
     fn default() -> Self {
         Self {
             provider_retry_count: DEFAULT_PROVIDER_RETRY_COUNT,
+            retry_forever: false,
             ws_retry_count: DEFAULT_WS_RETRY_COUNT,
             reconnect_initial_delay_ms: DEFAULT_RECONNECT_INITIAL_DELAY_MS,
             reconnect_max_delay_ms: DEFAULT_RECONNECT_MAX_DELAY_MS,
@@ -1489,6 +1493,10 @@ fn configured_connection_settings(home: &Path) -> ConnectionSettings {
             .and_then(|value| u8::try_from(value).ok())
             .unwrap_or(defaults.provider_retry_count)
             .min(10),
+        retry_forever: settings
+            .get("retry_forever")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.retry_forever),
         ws_retry_count: settings
             .get("ws_retry_count")
             .and_then(Value::as_u64)
@@ -1548,6 +1556,7 @@ async fn set_connection_settings(
     }
     let mut settings = read_settings(&state.home);
     settings["provider_retry_count"] = json!(body.provider_retry_count);
+    settings["retry_forever"] = json!(body.retry_forever);
     settings["ws_retry_count"] = json!(body.ws_retry_count);
     settings["reconnect_initial_delay_ms"] = json!(body.reconnect_initial_delay_ms);
     settings["reconnect_max_delay_ms"] = json!(body.reconnect_max_delay_ms);
@@ -3103,16 +3112,22 @@ async fn stop_session_task(state: &AppState, session_id: &str, task: &Arc<Sessio
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
-    if let Some(processes) = processes {
-        processes.terminate_all().await;
-    }
+    // 1.5.4o5 第 6 项：先推「已取消」事件，再去杀进程。
+    //
+    // 旧顺序是 `terminate_all().await` 之后才推事件 —— 而 terminate_all 要逐个
+    // SIGTERM 再等回收，一个有长任务的 proot 进程能拖上几秒。前端在这几秒里
+    // 什么都不知道，用户看到的就是「点了停止，过一会才停」。
+    // 现在事件立刻发出，进程清理挪到最后（仍然会被清理，只是不再挡住反馈）。
+    task.finish("cancelled");
+    task.push_event(json!({"event_type": "agent_cancelled"}));
+    task.push_event(json!({"event_type": "turn_end"}));
     if let Ok(parsed) = Uuid::parse_str(session_id) {
         let _ = SessionStore::new(&state.home).touch_updated_at(parsed);
     }
-    task.finish("cancelled");
     persist_task_checkpoints(state);
-    task.push_event(json!({"event_type": "agent_cancelled"}));
-    task.push_event(json!({"event_type": "turn_end"}));
+    if let Some(processes) = processes {
+        processes.terminate_all().await;
+    }
     true
 }
 
@@ -7105,6 +7120,9 @@ async fn handle_command(
                 context.send_error(envelope_id, "message text is required");
                 return;
             }
+            // 1.5.5：随消息带上来的图片路径（前端把附件路径一起发过来）。
+            // 这里只读文件、不做格式判断以外的处理；真正的协议转换在 provider 侧。
+            let attached_images = read_attached_images(&payload, &state.cwd);
             if prompt.eq_ignore_ascii_case("/memory") {
                 context.send_ack(envelope_id);
                 let report = MemoryManager::new(&state.home, &state.cwd).report();
@@ -7196,6 +7214,7 @@ async fn handle_command(
                     &turn_session_id,
                     &turn_prompt,
                     false,
+                    attached_images,
                     Arc::clone(&turn_context),
                     Arc::clone(&turn_task),
                 )
@@ -7206,6 +7225,11 @@ async fn handle_command(
                     if is_retryable_error_text(&message)
                         || message.contains("tool round limit reached")
                     {
+                        let code = if message.contains("tool round limit reached") {
+                            "tool round limit".to_string()
+                        } else {
+                            error_code_from_text(&message)
+                        };
                         turn_task.push_event(json!({
                             "event_type": "retry_confirmation",
                             "message": if message.contains("tool round limit reached") {
@@ -7214,6 +7238,8 @@ async fn handle_command(
                                 "自动恢复失败，任务已暂停"
                             },
                             "detail": message,
+                            // 1.5.4o5 第 4 项：重试提示旁边要显示报错代码
+                            "code": code,
                         }));
                     } else {
                         turn_task.push_event(json!({
@@ -7256,7 +7282,25 @@ async fn handle_command(
                 .and_then(Value::as_str)
                 .filter(|text| !text.trim().is_empty())
             {
-                context.task.input_queue.push(text.to_owned());
+                // 1.5.5：插队消息也带图片。图片直接内联成 data URL 文本说明 ——
+                // 输入队列只传字符串，为它单独加一条二进制通道不值当；
+                // 这里把「图在哪」写清楚（模型仍可用 view_image 主动读取）。
+                let images = read_attached_images(&payload, &state.cwd);
+                if images.is_empty() {
+                    context.task.input_queue.push(text.to_owned());
+                } else {
+                    let listing = payload
+                        .get("images")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    context.task.input_queue.push(format!(
+                        "{text}\n\n<queued_attachments>\n{listing}\n</queued_attachments>"
+                    ));
+                }
             }
             context.send_ack(envelope_id);
         }
@@ -7801,8 +7845,8 @@ async fn retry_turn(
             .any(|m| m.role == coomi_engine::Role::User),
         "no user message to retry"
     );
-    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在恢复上一轮任务"}));
-    run_turn(state, session_id, "", true, context, task).await
+    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay_ms":0,"message":"正在恢复上一轮任务","code":"retry"}));
+    run_turn(state, session_id, "", true, Vec::new(), context, task).await
 }
 
 /// 重新生成一条 assistant 回复：定位其对应的 user 提问，删除该回复及其后所有
@@ -7834,10 +7878,10 @@ async fn regenerate_response(
     // 从该 assistant 开始截断（删除它及其后所有），保留提问及之前历史。
     let _removed = session.truncate_from(msg_id).context("failed to truncate after message")?;
     store.save(&session).context("failed to save truncated session")?;
-    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在重新生成回复"}));
+    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay_ms":0,"message":"正在重新生成回复","code":"regenerate"}));
     // 用 recovery 模式继续：历史已截断到该提问为止，引擎基于保留的提问重新生成回复，
     // 且不会重复追加提问（continue_interrupted_turn 只追加内部恢复提示）。
-    run_turn(state, session_id, "", true, context, task).await
+    run_turn(state, session_id, "", true, Vec::new(), context, task).await
 }
 
 /// 编辑覆盖：定位目标 user 提问（缺省 = 最后一条 user 消息），截断它及其后所有
@@ -7877,7 +7921,7 @@ async fn edit_turn(
     store.save(&session).context("failed to save edited session")?;
     task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在重新执行编辑后的任务"}));
     // 历史已含新提问，recovery 模式从它继续执行且不会重复追加提问。
-    run_turn(state, session_id, "", true, context, task).await
+    run_turn(state, session_id, "", true, Vec::new(), context, task).await
 }
 
 /// 回撤：定位目标轮次的 user 提问（缺省 = 最后一条 user 消息；给 assistant id 时
@@ -8006,6 +8050,90 @@ async fn compact_web_session(
     Ok(())
 }
 
+/// 从错误文本里抠出报错代码（1.5.4o5 第 4 项）。
+///
+/// 引擎的 ProviderRequestError 的 Display 是
+/// `provider error [phase=… kind=Connect retryable=true status=429 …] …`，
+/// 这里优先取 `status=`，其次按关键字归类。只用于展示，不参与判定。
+/// 从 `send_message` 的 payload 里读出附件图片（1.5.5）。
+///
+/// 字段：`images: ["/abs/a.png", …]`。前端在发送时把附件列表一起带上；
+/// 这里只做三件事：解析路径、限制大小、读成字节。
+/// 单张 10 MiB、一次最多 6 张 —— 再多上游会直接 413，且上下文会被图片吃光。
+fn read_attached_images(payload: &Value, cwd: &Path) -> Vec<(String, Vec<u8>)> {
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    const MAX_COUNT: usize = 6;
+    let mut out = Vec::new();
+    let Some(items) = payload.get("images").and_then(Value::as_array) else {
+        return out;
+    };
+    for item in items.iter().take(MAX_COUNT) {
+        let Some(raw) = item.as_str().map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = Path::new(raw);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        let media_type = match path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            // 非图片附件（txt/pdf/…）不当作图片发送，走原来的「请读取这些文件」路径。
+            _ => continue,
+        };
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BYTES {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => out.push((media_type.to_string(), bytes)),
+            Err(error) => eprintln!("[send_message] failed to read image {}: {error}", path.display()),
+        }
+    }
+    out
+}
+
+pub fn error_code_from_text(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if let Some(index) = lower.find("status=") {
+        let digits: String = lower[index + 7..]
+            .chars()
+            .take_while(|value| value.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return format!("HTTP {digits}");
+        }
+    }
+    for (needle, label) in [
+        ("timed out", "Timeout"),
+        ("timeout", "Timeout"),
+        ("dns", "DNS"),
+        ("broken pipe", "BrokenPipe"),
+        ("reset", "ConnectionReset"),
+        ("stream failed", "Stream"),
+        ("tls", "TLS"),
+        ("captcha", "Captcha"),
+        ("unauthorized", "HTTP 401"),
+        ("forbidden", "HTTP 403"),
+    ] {
+        if lower.contains(needle) {
+            return label.to_string();
+        }
+    }
+    "Error".to_string()
+}
+
 fn is_retryable_error_text(message: &str) -> bool {
     let text = message.to_ascii_lowercase();
     if ["http 400", "http 401", "http 402", "http 403", "http 404"]
@@ -8092,6 +8220,8 @@ async fn run_turn(
     session_id: &str,
     prompt: &str,
     recovery: bool,
+    // 随这条用户消息一起发送的图片（1.5.5）。为空时行为与旧版完全一致。
+    images: Vec<(String, Vec<u8>)>,
     context: Arc<ConnectionContext>,
     task: Arc<SessionTask>,
 ) -> Result<()> {
@@ -8364,6 +8494,7 @@ async fn run_turn(
             connection_settings.reconnect_initial_delay_ms,
             connection_settings.reconnect_max_delay_ms,
         )
+        .with_retry_forever(connection_settings.retry_forever)
         .with_reasoning_effort(reasoning_effort)
         .with_input_queue(Arc::clone(&task.input_queue))
         .with_turn_control(turn_control)
@@ -8414,9 +8545,10 @@ async fn run_turn(
             .await
     } else {
         agent
-            .run_turn(
+            .run_turn_with_images(
                 &mut session,
                 prompt.to_owned(),
+                images,
                 &provider,
                 &tools,
                 &approval,
@@ -9406,6 +9538,7 @@ impl AgentObserver for BrowserObserver {
                 max_attempts,
                 delay_ms,
                 message,
+                code,
             } => {
                 self.task.push_event(json!({
                     "event_type": "connection_retry",
@@ -9413,6 +9546,8 @@ impl AgentObserver for BrowserObserver {
                     "max_attempts": max_attempts,
                     "delay_ms": delay_ms,
                     "message": message,
+                    // 1.5.4o5 第 4 项：重试提示旁边要显示报错代码
+                    "code": code,
                 }));
             }
             AgentEvent::StreamReset => {

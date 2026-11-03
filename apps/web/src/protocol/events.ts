@@ -40,12 +40,29 @@ export interface UsageUpdateEvent {
   reasoning_efforts?: Partial<Record<'auto' | 'low' | 'medium' | 'high' | 'xhigh', ReasoningEffortStats>>
   context_categories?: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
 }
-export interface ConnectionRetryEvent { event_type: 'connection_retry'; attempt: number; max_attempts: number; delay?: number; delay_ms?: number; message: string }
+/** 重试提示：`max_attempts` 为 0 表示「无限重试」（1.5.4o5 第 4 项）。 */
+export interface ConnectionRetryEvent {
+  event_type: 'connection_retry'
+  attempt: number
+  max_attempts: number
+  delay?: number
+  delay_ms?: number
+  message: string
+  /** 报错代码（`HTTP 429` / `Timeout` / …），显示在重试提示旁边。 */
+  code?: string
+}
 export interface StreamResetEvent { event_type: 'stream_reset' }
 export interface CompressionEvent { event_type: 'compression'; before: number; after: number; summary?: string }
 export interface AgentErrorEvent { event_type: 'agent_error'; message: string; is_fatal: boolean; captcha_required?: boolean }
 export interface ConfigurationRequiredEvent { event_type: 'configuration_required'; message: string; route: '/providers' }
-export interface RetryConfirmationEvent { event_type: 'retry_confirmation'; message: string }
+export interface RetryConfirmationEvent {
+  event_type: 'retry_confirmation'
+  message: string
+  /** 引擎给的原始错误文本（含 `status=…` / `kind=…`），前端提取成错误码展示。 */
+  detail?: string
+  /** 引擎提取好的错误码，优先用它。 */
+  code?: string
+}
 export interface AgentCancelledEvent { event_type: 'agent_cancelled' }
 export interface BgTaskDetachedEvent { event_type: 'bg_task_detached'; task_id: string; tool_name: string }
 export interface BgTaskCompletedEvent { event_type: 'bg_task_completed'; task_id: string; tool_name: string; is_error: boolean }

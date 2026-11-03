@@ -64,7 +64,14 @@ const hasNative = typeof window !== 'undefined' && !!window.CoomiAndroid
 
 const canSend = computed(() => text.value.trim().length > 0 || importedFiles.value.length > 0)
 const isJumpIn = computed(() => session.isBusy && canSend.value)
-const showStop = computed(() => session.isBusy && !canSend.value)
+/**
+ * 发送键的三态（1.5.4o5 第 6 项）：
+ *   stopping —— 已经按下停止、等引擎回话：显示「停止中」的静态方块，不再可点。
+ *   stop     —— 正在跑且输入框为空：显示停止。
+ *   jump     —— 正在跑但输入框有内容：插队发送。
+ */
+const stopping = computed(() => session.cancelling)
+const showStop = computed(() => session.isBusy && !canSend.value && !stopping.value)
 
 /**
  * 底部模式按钮溢出折叠。
@@ -163,17 +170,17 @@ function findStatusBar(): HTMLElement | null {
 function setStatusBarHidden(hidden: boolean) {
   const bar = findStatusBar()
   if (!bar) return
-  bar.style.transition = 'opacity .26s ease, transform .26s ease, filter .26s ease'
+  // 1.5.4o5 第 8 项：这里原来也带了 blur(6px) —— 状态条文字每帧重新栅格化，
+  // 同样是"展开很卡"的一部分。位移 + 淡出足够了，观感差别肉眼不可见。
+  bar.style.transition = 'opacity .18s ease-out, transform .24s cubic-bezier(.2,0,0,1)'
   if (hidden) {
     bar.style.opacity = '0'
     bar.style.transform = 'translateY(-14px)'
-    bar.style.filter = 'blur(6px)'
     bar.style.pointerEvents = 'none'
     return
   }
   bar.style.opacity = ''
   bar.style.transform = ''
-  bar.style.filter = ''
   bar.style.pointerEvents = ''
 }
 
@@ -361,16 +368,38 @@ const effortToggleEl = ref<HTMLElement | null>(null)
 /**
  * 当前模型声明的可用强度。
  *
- * 来源只有一处：模型的 `modelParameters[model].thinkingEfforts`，由
- * 「保存模型」时调用引擎的探测接口写入。没有声明时才退回兜底的 低/中 ——
- * 不再默认摆出「高 / 超高」，因为那两家不一定认。
+ * 来源按优先级：
+ *   ① 模型的 `modelParameters[model].thinkingEfforts`（保存模型时探测/手填的）；
+ *   ② 本地缓存 `coomi.efforts.<provider:model>`（探测结果先落本地，避免
+ *      「探测完了但 provider 列表还没刷新 → 选项暂时消失」）；
+ *   ③ 兜底只给 low / medium。
+ *
+ * 1.5.4o4 第 2 项就是 ②：原来只认 ①，探测结果要走一次
+ * patchModelParams → upsert → fetchProviders 的异步往返，中间任何一次
+ * 列表刷新失败或时序错位，档位就会「不显示」；而且用户刚点完又会被下面的
+ * 收敛 watcher 按旧清单打回 auto，表现为「无法切换」。
  */
 const declaredEfforts = computed<string[]>(() => {
   const provider = config.providers.find(item => item.id === config.currentProviderId)
   const list = provider?.modelParameters?.[config.currentModel]?.thinkingEfforts
   if (Array.isArray(list) && list.length > 0) return list
+  const cached = readEffortList(`${config.currentProviderId}:${config.currentModel}`)
+  if (cached.length > 0) return cached
   return DEFAULT_THINKING_EFFORTS
 })
+
+function readEffortList(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(`coomi.efforts.${key}`)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.length > 0) : []
+  } catch { return [] }
+}
+
+function writeEffortList(key: string, list: string[]) {
+  try { localStorage.setItem(`coomi.efforts.${key}`, JSON.stringify(list)) } catch { /* 配额满就算了 */ }
+}
 
 const effortOptions = computed(() => {
   const seen = new Set<string>()
@@ -421,6 +450,8 @@ async function ensureEffortsProbed() {
       { model },
     )
     if (Array.isArray(result.efforts) && result.efforts.length > 0) {
+      // 先写本地（界面立刻生效，不等 provider 列表往返），再回写配置。
+      writeEffortList(key, result.efforts)
       config.patchModelParams(providerId, model, { thinkingEfforts: result.efforts })
     }
     markEffortCached(key)
@@ -447,18 +478,30 @@ function toggleEffort() {
 }
 
 function pickEffort(effort: string) {
+  // 选档位无条件生效。若这个档位还不在清单里（例如刚探测到、provider 列表尚未
+  // 刷新），顺手并进本地清单，保证下次点开还在，不会被收敛逻辑打回 auto。
+  if (effort !== 'off' && effort !== 'auto' && !declaredEfforts.value.includes(effort)) {
+    const next = [...declaredEfforts.value, effort]
+    writeEffortList(effortCacheKey(), next)
+    void config.patchModelParams(config.currentProviderId, config.currentModel, { thinkingEfforts: next })
+  }
   session.setReasoningEffort(effort as any)
   effortOpen.value = false
 }
 
-// 换模型时如果当前档位不在新模型的清单里，收敛到「自动」，
-// 避免用户看着「高」实际被上游 400 拒掉。
-// immediate：旧版本可能把 'high' / 'xhigh' 存进了 localStorage，进来先收敛一次，
-// 免得界面显示一个当前模型并不支持的档位。
-watch([declaredEfforts, () => config.reasoningEffort], () => {
+/**
+ * 换模型后收敛一次档位。
+ *
+ * 只在 provider / model 真的变了时跑。旧版监听的是 declaredEfforts —— 探测结果
+ * 一回来清单就变，收敛逻辑随即把用户刚选的档位判成非法并打回 auto，这就是
+ * 1.5.4o4 第 2 项「选完不显示 / 无法切换」。现在只认模型切换，off / auto 原样保留。
+ */
+watch([() => config.currentProviderId, () => config.currentModel], () => {
+  const current = config.reasoningEffort
+  if (current === 'off' || current === 'auto') return
   const allowed = new Set(effortOptions.value.map(item => item.value))
-  if (!allowed.has(config.reasoningEffort)) session.setReasoningEffort('auto')
-}, { immediate: true })
+  if (!allowed.has(current)) session.setReasoningEffort('auto')
+})
 const providerReady = computed(() => config.providers.some(provider => (
   provider.id === config.activeId
   && provider.models.length > 0
@@ -936,12 +979,13 @@ watch(text, () => {
           <button
             ref="sendButton"
             class="send"
-            :class="{ jump: isJumpIn, stop: showStop }"
-            :disabled="!canSend && !session.isBusy"
-            :aria-label="showStop ? '停止' : isJumpIn ? '插队' : '发送'"
+            :class="{ jump: isJumpIn && !stopping, stop: showStop || stopping, stopping }"
+            :disabled="stopping || (!canSend && !session.isBusy)"
+            :aria-label="stopping ? '停止中' : showStop ? '停止' : isJumpIn ? '插队' : '发送'"
             @click="tapPrimary"
           >
-            <CoomiIcon v-if="showStop" name="stop" :size="17" />
+            <span v-if="stopping" class="stop-square" aria-hidden="true" />
+            <CoomiIcon v-else-if="showStop" name="stop" :size="17" />
             <CoomiIcon v-else-if="isJumpIn" name="subtask" :size="18" />
             <CoomiIcon v-else name="arrowUp" :size="18" />
           </button>
@@ -1186,12 +1230,14 @@ watch(text, () => {
   opacity: 0;
   transform-origin: var(--origin-x, 16px) var(--origin-y, 16px);
   transform: translate(var(--from-x, 0px), var(--from-y, 12px)) scale(var(--from-scale, .2));
-  filter: blur(6px);
+  /* 1.5.4o5 第 8 项：去掉了 `filter: blur()`。
+     blur 会让 WebView 在整个动画期间把面板内所有文字重新栅格化（每帧一次），
+     这是"模式展开很卡"的主因。改用"从 0.86 缩放到 1 + 透明度"——
+     视觉上同样是"从按键里长出来"，但全程只走合成器，不进主线程重排。 */
   pointer-events: none;
   transition:
-    opacity .26s cubic-bezier(.22,.68,.19,1),
-    transform .34s cubic-bezier(.22,.68,.19,1),
-    filter .26s cubic-bezier(.22,.68,.19,1);
+    opacity .18s ease-out,
+    transform .26s cubic-bezier(.2, 0, 0, 1);
   will-change: transform, opacity;
 }
 
@@ -1199,17 +1245,16 @@ watch(text, () => {
 .mode-pop.open {
   opacity: 1;
   transform: none;
-  filter: blur(0px);
   pointer-events: auto;
   /* 到位后立刻可以点：卡片是摞着的，用户可能想直接点最上面那张 */
 }
 
 /* 关闭动画 / 减弱动效：不做分裂，直接显形 */
 @media (prefers-reduced-motion: reduce) {
-  .mode-pop { transform: none; filter: none; transition: none; }
+  .mode-pop { transform: none; transition: none; }
 }
 [data-all-animations-off] .mode-pop {
-  transform: none; filter: none; transition: none;
+  transform: none; transition: none;
 }
 
 /*
@@ -1225,9 +1270,8 @@ watch(text, () => {
   transform: translateX(118%);
   opacity: 0;
   transition:
-    transform .34s cubic-bezier(.22,.68,.19,1),
-    opacity .16s ease .26s,
-    filter .34s cubic-bezier(.22,.68,.19,1);
+    transform .3s cubic-bezier(.2, 0, 0, 1),
+    opacity .14s ease .16s;
   pointer-events: none;
 }
 
@@ -1356,6 +1400,10 @@ watch(text, () => {
 .send.stop { background: var(--text); }
 .send:disabled { background: var(--border-strong); pointer-events: none; }
 .send:active { transform: scale(.92); }
+/* 停止中：不转圈、不抖动，只把图标换成一个小方块并降一点不透明度 ——
+   反馈要"立刻看得见"，但不能再制造新的等待动画。 */
+.send.stopping { background: var(--text); opacity: .55; }
+.stop-square { width: 12px; height: 12px; border-radius: 2.5px; background: #fff; }
 
 /* 指令面板浮层：可滚动卡片 */
 .quick-scrim { position: fixed; inset: 0; z-index: 1; }

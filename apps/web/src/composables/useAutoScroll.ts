@@ -3,29 +3,32 @@ import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
 /**
  * 瀑布流跟随滚动。
  *
- * - 默认贴底：每次内容增长用 rAF 合并一次滚动，流式输出下不会一秒 setState 几十次；
- * - 用户往上滑超过阈值就脱离跟随（不再跟着往下跑），并露出「回到底部」；
- * - 重新滑到底部自动恢复跟随。
+ * 规则只有一条：**只有用户自己的手指/滚轮能决定「跟不跟随」**。
+ * 虚拟列表重测量时会自己写 scrollTop，那是程序行为，绝不能被当成"用户在往上翻"；
+ * 反过来，用户往上滑之后，也绝不能被内容增长拽回底部。
  *
- * 关键修复：
- * - 区分「用户真正滚动」和「虚拟列表自身测量导致的 scrollTop 抖动」。
- *   只有在 wheel/pointer/touch 输入后 250ms 内、且 scrollTop 真正移动了 >4px，
- *   才判定为用户上翻，脱离跟随。避免虚拟回收行重测量把「正在跟随」误判成「用户跑了」。
- * - jumpToBottom 不再连续调度 rAF + smooth scroll，避免持续抢滚动位置导致页面乱跳。
+ * 1.5.4o4 修的两件事：
+ *   ① 「向上滑了一段距离还会自动置底」—— 手指离开后惯性还在滑，旧实现只看
+ *      touchstart 期间的 scroll 事件，惯性滚动落进了"程序自己滚动"的盲区，
+ *      于是一有新内容就 follow 到底。现在 touchmove / touchend 之后 700ms 内
+ *      只要 scrollTop 是**变小**的，一律算用户上翻。
+ *   ② 「回复完成锁死」的补丁原来靠无条件置底，撞上了用户上翻。改成事件区分：
+ *      内容变高只 follow；只有切会话/恢复历史这种"必须回到底部"的场合才 jump。
  */
 /**
- * 脱离 / 重新跟随的距离阈值（1.5.4o3 第 5 项）。
- *
- * 用户原话：「自动置底的判定距离太长了，都滑到上面了还会自动置底」。
- * 40px 在手感上等于「刚想往上翻一屏，它又把你拽回去」—— 手机上 40px 还不到一行。
- * 现在缩到 12px：只要真的离开底部一行以内就停止跟随；回到底部 8px 内再恢复。
- * 判断依据仍然只有**用户输入事件**（见 onScroll），所以缩小阈值不会误伤。
+ * 脱离跟随的距离阈值。
+ * 手机上 12px 不到一行：只要真的离开底部就停止跟随。
  */
 const DETACH_PX = 12
+/** 回到底部多近才恢复跟随。 */
 const REATTACH_PX = 8
 /** scrollTop 是小数，写进去再读回来可能差一点点。 */
 const SAME_POS_PX = 2
-/** 「回到底部」的平滑滚动期间不判定脱离 —— 那一路的 scroll 事件都是我们自己发的。 */
+/** 用户手指离开后，惯性滚动仍要算作用户行为的时长。 */
+const INERTIA_MS = 700
+/** 脱离跟随后的冷静期：这段时间内不因为"看起来在底部"就自动恢复。 */
+const DETACH_COOLDOWN_MS = 400
+/** 我们自己发起的平滑滚动期间不判定脱离。 */
 const SMOOTH_MS = 800
 
 export function useAutoScroll(
@@ -41,25 +44,52 @@ export function useAutoScroll(
   let touchReleaseTimer: ReturnType<typeof setTimeout> | null = null
   let attached: HTMLElement | null = null
   let lastInputTs = 0
-  let lastInputTop = -1
+  /** 上一次 onScroll 看到的位置，用来判断"这次是往上还是往下"。 */
+  let lastScrollTop = 0
+  /** 手指离开的时刻，惯性判定窗口的起点。 */
+  let touchEndAt = 0
+  /** 脱离跟随的时刻，冷静期的起点。 */
+  let detachedAt = 0
 
   function distanceFromBottom(el: HTMLElement): number {
     return el.scrollHeight - el.scrollTop - el.clientHeight
+  }
+
+  function detach() {
+    if (!following.value) return
+    following.value = false
+    detachedAt = performance.now()
   }
 
   function onScroll() {
     const el = target.value
     if (!el) return
     const now = performance.now()
-    const deltaFromLast = Math.abs(el.scrollTop - lastInputTop)
-    const userScrolled = (now - lastInputTs < 250) && deltaFromLast > 4
+    const top = el.scrollTop
+    const movedUp = top < lastScrollTop - 4
+    lastScrollTop = top
     const d = distanceFromBottom(el)
-    if (following.value) {
-      const moved = Math.abs(el.scrollTop - pinnedTop) > SAME_POS_PX
-      if ((touching || (userScrolled && moved)) && d > DETACH_PX && now >= suppressUntil) following.value = false
-    } else if (d < REATTACH_PX) {
-      following.value = true
+
+    if (!following.value) {
+      // 只有「用户自己滑回底部」才恢复：既要在近底部，也要过了冷静期，
+      // 避免程序把位置写到底后立刻又被判成"用户想跟随"（来回抖）。
+      if (d < REATTACH_PX && now - detachedAt > DETACH_COOLDOWN_MS
+        && now >= suppressUntil) {
+        following.value = true
+      }
+      return
     }
+
+    if (now < suppressUntil) return
+    // 用户正在摸屏幕，或者刚离开手指不到 700ms 且在往上滑 —— 都算用户上翻。
+    const touchingNow = touching || now - touchEndAt < INERTIA_MS
+    const recentWheel = now - lastInputTs < 250
+    if (d > DETACH_PX && (movedUp && (touchingNow || recentWheel))) {
+      detach()
+      return
+    }
+    // 手指按住不放、但 scrollTop 已被程序滚到上面：以手指为准，也脱离。
+    if (d > DETACH_PX && touching) detach()
   }
 
   /** 内容变化后调用；只在跟随态生效。 */
@@ -69,30 +99,20 @@ export function useAutoScroll(
     raf = requestAnimationFrame(() => {
       raf = 0
       const scroller = target.value
-      if (!scroller || !following.value) return
-      /**
-       * 1.5.4o3 第 5 项：输出时"上下闪"的根因就在这里。
-       *
-       * 原来每帧先调 settleVirtualBottom()（虚拟列表内部会自己把滚动器挪到底），
-       * 紧接着又写一次 el.scrollTop = scrollHeight。两次写入如果落在同一帧里
-       * 且中间内容高度刚变化，浏览器会按第一个位置先绘制一次、再按第二个位置绘制
-       * 一次 —— 看到的就是"上下闪一下"。流式输出时每帧都在重复这个过程。
-       *
-       * 现在只做一件事：如果虚拟列表需要收尾就让它收尾，否则直接写到底；
-       * 且写之前先比一下目标位置，位置本来就对就完全不碰（避免无意义的重排）。
-       */
+      if (!scroller || !following.value || touching) return
       const bottom = scroller.scrollHeight
       if (settleVirtualBottom) {
-        // 有虚拟滚动器时交给它：它会同时把内部容器与 scrollTop 一次对到底，
-        // 我们不再补写，避免两次写入。
+        // 有虚拟滚动器时交给它一次对到底，不再补写第二遍（两次写入 = 上下闪）
         settleVirtualBottom()
       } else if (Math.abs(scroller.scrollTop - (bottom - scroller.clientHeight)) > SAME_POS_PX) {
         scroller.scrollTop = bottom
       }
       pinnedTop = scroller.scrollTop
+      lastScrollTop = scroller.scrollTop
     })
   }
 
+  /** 无条件回到底部（切会话 / 恢复历史 / 点"回到底部"）。 */
   function jumpToBottom() {
     const el = target.value
     if (!el) return
@@ -101,33 +121,49 @@ export function useAutoScroll(
     suppressUntil = performance.now() + SMOOTH_MS
     el.scrollTop = el.scrollHeight
     pinnedTop = el.scrollTop
+    lastScrollTop = el.scrollTop
     settleVirtualBottom?.()
   }
 
   function onTouchStart() {
     touching = true
+    touchEndAt = 0
     if (touchReleaseTimer) { clearTimeout(touchReleaseTimer); touchReleaseTimer = null }
+    const el = target.value
+    if (el) lastScrollTop = el.scrollTop
+    lastInputTs = performance.now()
+  }
+
+  function onTouchMove() {
+    lastInputTs = performance.now()
   }
 
   function onTouchEnd() {
+    touching = false
+    touchEndAt = performance.now()
     if (touchReleaseTimer) clearTimeout(touchReleaseTimer)
     touchReleaseTimer = setTimeout(() => {
-      touching = false
+      touchReleaseTimer = null
       const el = target.value
-      if (el && distanceFromBottom(el) < REATTACH_PX) following.value = true
-    }, 90)
+      if (!el) return
+      if (!following.value && distanceFromBottom(el) < REATTACH_PX
+        && performance.now() - detachedAt > DETACH_COOLDOWN_MS) {
+        following.value = true
+      }
+    }, 120)
   }
 
   function markUserInput() {
     lastInputTs = performance.now()
     const el = target.value
-    lastInputTop = el ? el.scrollTop : -1
+    if (el) lastScrollTop = el.scrollTop
   }
 
-  function detach(el: HTMLElement | null) {
+  function detachListeners(el: HTMLElement | null) {
     if (!el) return
     el.removeEventListener('scroll', onScroll)
     el.removeEventListener('touchstart', onTouchStart)
+    el.removeEventListener('touchmove', onTouchMove)
     el.removeEventListener('touchend', onTouchEnd)
     el.removeEventListener('touchcancel', onTouchEnd)
     el.removeEventListener('wheel', markUserInput)
@@ -136,11 +172,13 @@ export function useAutoScroll(
 
   function attach(el: HTMLElement | null) {
     if (attached === el) return
-    detach(attached)
+    detachListeners(attached)
     attached = el
     if (!el) return
+    lastScrollTop = el.scrollTop
     el.addEventListener('scroll', onScroll, { passive: true })
     el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
     el.addEventListener('touchend', onTouchEnd, { passive: true })
     el.addEventListener('touchcancel', onTouchEnd, { passive: true })
     el.addEventListener('wheel', markUserInput, { passive: true })
@@ -151,7 +189,7 @@ export function useAutoScroll(
   watch(target, attach, { immediate: true })
 
   onBeforeUnmount(() => {
-    detach(attached)
+    detachListeners(attached)
     attached = null
     if (raf) cancelAnimationFrame(raf)
     if (touchReleaseTimer) clearTimeout(touchReleaseTimer)

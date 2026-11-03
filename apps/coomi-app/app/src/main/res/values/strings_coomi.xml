@@ -311,4 +311,8 @@
     <string name="coomi_log_source_logcat">系统日志</string>
     <string name="coomi_log_copy">复制全部</string>
     <string name="coomi_log_share">分享</string>
+    <string name="coomi_log_repair_title">修复引擎</string>
+    <string name="coomi_log_repair_desc">把前端解包目录、Runtime 版本目录、引擎指纹和部署标记清掉，让下一次启动按 APK 内置资产重新部署。对话历史、提供商配置、持久 home 与工作区都会保留，不删任何用户数据。</string>
+    <string name="coomi_log_repair_action">立即修复</string>
+    <string name="coomi_log_repair_restart">修复并重启引擎</string>
 </resources>

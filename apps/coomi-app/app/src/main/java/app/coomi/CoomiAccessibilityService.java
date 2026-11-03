@@ -4,6 +4,9 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
+import android.view.Display;
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback;
+import android.accessibilityservice.AccessibilityService.ScreenshotResult;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.FileObserver;
@@ -494,6 +497,16 @@ public final class CoomiAccessibilityService extends AccessibilityService {
                     output = describeScreen();
                     ok = !output.contains("无法读取当前窗口");
                     break;
+                case "screenshot": {
+                    // 1.5.5：真正的截图。以前这个动作只走 adb 回退（screencap），
+                    // 没有 adb 权限时直接失败；而 read_screen 只有文字 —— 于是
+                    // 「截图识别不了、OCR 只能提取文字」。这里用无障碍 API 自带的
+                    // takeScreenshot（API 30+），把 PNG 写到应用私有目录并回传路径。
+                    String path = captureScreenshot();
+                    ok = path != null;
+                    output = ok ? path : "截图失败：系统未返回画面（Android 11+ 且无障碍已授权才可用）";
+                    break;
+                }
                 case "input_text":
                     ok = true;
                     output = currentInputText();
@@ -525,6 +538,71 @@ public final class CoomiAccessibilityService extends AccessibilityService {
         } catch (Throwable ignored) {
             // 写不进去时引擎侧会超时，属于可接受的降级
         }
+    }
+
+    /**
+     * 用无障碍 API 截图并落盘（1.5.5）。
+     *
+     * <p>{@code AccessibilityService.takeScreenshot} 从 API 30 起提供，不需要
+     * MediaProjection 授权弹窗，也不需要 adb —— 这正是控制模式里最缺的一块：
+     * 之前 {@code read_screen} 只能给文字，{@code screenshot} 只能走 adb，
+     * 没有 adb 时整条「看图」链路是断的。</p>
+     *
+     * <p>实现要点：异步回调 + CountDownLatch 等到结果；Bitmap 压缩成 PNG 写进
+     * 应用私有目录（{@code filesDir/control-shots}），返回绝对路径。失败一律返回
+     * null，由引擎侧降级成纯文本提示，不抛异常。</p>
+     */
+    private String captureScreenshot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null;
+        final Object lock = new Object();
+        final String[] result = {null};
+        final boolean[] done = {false};
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
+                new TakeScreenshotCallback() {
+                    @Override public void onSuccess(ScreenshotResult screenshot) {
+                        try {
+                            android.graphics.Bitmap bitmap =
+                                android.graphics.Bitmap.wrapHardwareBuffer(screenshot.getHardwareBuffer(), null);
+                            if (bitmap == null) {
+                                synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                                return;
+                            }
+                            File dir = new File(getFilesDir(), "control-shots");
+                            if (!dir.isDirectory() && !dir.mkdirs()) {
+                                synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                                return;
+                            }
+                            File target = new File(dir, "shot-" + System.currentTimeMillis() + ".png");
+                            try (FileOutputStream out = new FileOutputStream(target)) {
+                                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+                                out.getFD().sync();
+                            }
+                            bitmap.recycle();
+                            result[0] = target.getAbsolutePath();
+                        } catch (Throwable ignored) {
+                            result[0] = null;
+                        } finally {
+                            synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                        }
+                    }
+
+                    @Override public void onFailure(int errorCode) {
+                        synchronized (lock) { done[0] = true; lock.notifyAll(); }
+                    }
+                });
+            synchronized (lock) {
+                long deadline = System.currentTimeMillis() + 8_000L;
+                while (!done[0]) {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left <= 0) break;
+                    lock.wait(left);
+                }
+            }
+        } catch (Throwable ignored) {
+            return null;
+        }
+        return result[0];
     }
 
     /** 使 describeScreen 缓存失效 */

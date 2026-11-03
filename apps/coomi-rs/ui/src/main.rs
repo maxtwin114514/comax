@@ -604,7 +604,9 @@ impl AgentObserver for TerminalObserver {
             AgentEvent::Text(text) => println!("\n{text}"),
             AgentEvent::TextDelta(text) => print!("{text}"),
             AgentEvent::ReasoningDelta(text) => eprint!("{text}"),
-            AgentEvent::ConnectionRetry { message, .. } => eprintln!("\n{message}"),
+            AgentEvent::ConnectionRetry { message, code, .. } => {
+                eprintln!("\n{message} [{code}]")
+            }
             AgentEvent::StreamReset => eprintln!("\n[discarding interrupted partial response]"),
             AgentEvent::ContextUpdated(status) => eprintln!(
                 "[context {}% {}/{}]",

@@ -84,6 +84,8 @@ public final class CoomiLogActivity extends AppCompatActivity {
         });
         findViewById(R.id.btn_log_copy).setOnClickListener(v -> copyAll());
         findViewById(R.id.btn_log_share).setOnClickListener(v -> shareAll());
+        findViewById(R.id.btn_log_repair).setOnClickListener(v -> runRepair(false));
+        findViewById(R.id.btn_log_restart_engine).setOnClickListener(v -> runRepair(true));
 
         engineButton.setOnClickListener(v -> selectSource(Source.ENGINE));
         crashButton.setOnClickListener(v -> selectSource(Source.CRASH));
@@ -127,6 +129,47 @@ public final class CoomiLogActivity extends AppCompatActivity {
     private void selectSource(Source next) {
         source = next;
         load();
+    }
+
+    /**
+     * 修复引擎（1.5.4o4 第 5 项）。
+     *
+     * 二次确认是必要的：这一步会删掉前端解包目录与 Runtime 版本目录，虽然都能从
+     * APK 重建、也不碰任何用户数据，但重建本身要几十秒，误触的代价是"引擎暂时用不了"。
+     * 确认文案里把"保留什么"写清楚，用户才敢按。
+     */
+    private void runRepair(boolean restartAfter) {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.coomi_log_repair_title)
+            .setMessage("将清理：前端解包目录、Runtime 版本目录、引擎指纹、部署标记。\n\n"
+                + "会保留：全部对话历史、提供商与设置、持久 home、工作区文件。\n\n"
+                + "清理后引擎下一次启动会按 APK 内置资产重新部署，可能需要几十秒。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton(restartAfter ? "修复并重启" : "立即修复", (dialog, which) -> {
+                String result = CoomiEngineRepair.repair(this).summary;
+                // 结果直接打进日志正文区：用户点完按钮就能看到删了什么，
+                // 不用再切一轮"刷新"去猜。
+                fileLabel.setText("引擎修复结果");
+                content.setText(result);
+                if (restartAfter) restartEngineFromBackground();
+                else toast("修复完成；重启引擎后生效");
+            })
+            .show();
+    }
+
+    /**
+     * 不依赖界面绑定地重启引擎：startService 会拉起 CoomiService，
+     * 已经在跑时它会自己判断是否需要重新 startEngineSync。
+     */
+    private void restartEngineFromBackground() {
+        try {
+            Intent intent = new Intent(this, CoomiService.class);
+            intent.setAction(CoomiService.ACTION_REPAIR_RESTART);
+            startService(intent);
+            toast("已请求重启引擎；可稍后刷新日志确认");
+        } catch (Exception error) {
+            toast("无法启动引擎服务：" + error.getMessage());
+        }
     }
 
     private File currentFile() {

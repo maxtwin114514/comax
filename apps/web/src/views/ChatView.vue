@@ -60,6 +60,153 @@ const { following, follow, jumpToBottom } = useAutoScroll(scroller, settleVirtua
 
 const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.timeline))
 
+/**
+ * ──────────────────────────────────────────────────────────────
+ * 1.5.4o5 第 7 项：长消息把历史顶掉 / 内容被复制一份卡在最上方
+ * ──────────────────────────────────────────────────────────────
+ * 症状表现：输出到一定程度后，忽然整段旧内容不见了，同时最上方多出一半被截断的
+ * 内容反弹回顶部。
+ *
+ * 根因在虚拟列表：vue-virtual-scroller 的 DynamicScroller 只在**条目尺寸变化时**
+ * 重新计算顶部偏移。流式输出时最后一条消息每帧都在长高、而它的高度又要靠
+ * 元素自己 emit resize 才知道 —— 中间任何一帧测量没接上，`sizes` 就落后于真实
+ * 高度，随后整块的 offset 被算错，表现为「历史被顶掉、内容错位复制」。
+ *
+ * 对策不是"参数调大调小"，而是**不做流式虚拟化**：
+ *   · 对话中（`isBusy`）整条时间线铺在一个普通滚动容器（`own-stream`）里，
+ *     没有虚拟列表，条目高度随便长都不会算错偏移；
+ *   · 空闲时看历史回到虚拟列表，长会话依旧只渲染屏幕内的条目；
+ *   · 两种模式**互斥渲染**，任何时刻只有一份 DOM 承载内容 —— 这就从根上消除了
+ *     「同一段内容被复制一份卡在最上方、旧内容被顶掉」。
+ * 切换只在「开始 / 结束一轮」时发生，中间不会来回跳。
+ */
+/**
+ * 独占模式的"当前滚动视口"：始终指向 nodes[index]。
+ * 用节点下标而不是元素引用，因为 DOM 可能在这一帧之后才挂上（v-if / 模式切换）。
+ */
+const ownScroller = ref<HTMLElement | null>(null)
+/** 独占层贴底的 rAF 句柄（一帧最多写一次 scrollTop）。 */
+let ownRaf = 0
+/** 与虚拟列表同一套阈值：离底 12px 脱离，回到底部 8px 内恢复。 */
+const OWN_DETACH_PX = 12
+const OWN_REATTACH_PX = 8
+/** 独占层是否贴底跟随（ref：模板按钮的显示条件依赖它）。 */
+const ownFollowing = ref(true)
+let ownLastTop = 0
+let ownTouching = false
+
+function onOwnScroll() {
+  const list = ownScroller.value
+  if (!list) return
+  const top = list.scrollTop
+  const movedUp = top < ownLastTop - 4
+  ownLastTop = top
+  const distance = list.scrollHeight - top - list.clientHeight
+  if (ownFollowing.value && distance > OWN_DETACH_PX && (movedUp || ownTouching)) ownFollowing.value = false
+  else if (!ownFollowing.value && distance < OWN_REATTACH_PX) ownFollowing.value = true
+}
+
+function onOwnTouchStart() { ownTouching = true }
+function onOwnTouchEnd() {
+  // 手指离开后还有惯性：晚一点再解除，避免惯性途中被当成"程序滚动"。
+  setTimeout(() => { ownTouching = false }, 120)
+}
+
+/** 独占层内容变化后贴底：合并到一帧、只在跟随态生效。 */
+function followOwn() {
+  if (!ownFollowing.value || ownTouching) return
+  if (ownRaf) return
+  ownRaf = requestAnimationFrame(() => {
+    ownRaf = 0
+    const list = ownScroller.value
+    if (!list || !ownFollowing.value || ownTouching) return
+    list.scrollTop = list.scrollHeight
+    ownLastTop = list.scrollTop
+  })
+}
+
+/** 把 nodes 与 blocks 对齐（独占模式下的渲染源）。 */
+const nodes = ref<TimelineBlockItem[]>([])
+
+/**
+ * 1.5.4o5 第 7 项 · 主模式切换。
+ *
+ * `busy`（对话中）用独占滚动层，`idle`（看历史）用虚拟列表。
+ * 两种模式互斥渲染，任何时刻只有一份 DOM 承载内容 —— 这从根上消除了
+ * 「复制一份内容卡在最上方、历史被顶掉」。
+ *
+ * 何时切：开始输出后 90ms 再切（让刚发出去的消息先落位，避免容器闪一次）；
+ * 结束后 260ms 再切回虚拟列表（等最后一段高度稳定）。
+ */
+/**
+ * 初始模式：默认 'own'。
+ *
+ * 用 'own' 起步是刻意的 —— 进场时要恢复历史（`session.restoring`），
+ * 这时候虚拟列表还在逐条量高度，正好是最容易算错偏移的时刻。
+ * 等恢复完、且确实不忙，再降级到虚拟列表；如果进来就在跑任务，就继续用 own。
+ */
+const renderMode = ref<'virtual' | 'own'>('own')
+watch(() => session.isBusy, busy => {
+  if (busy) {
+    window.setTimeout(() => {
+      ownFollowing.value = true
+      nodes.value = blocks.value.slice()
+      renderMode.value = 'own'
+      nextTick(() => { followOwn() })
+    }, 90)
+  } else {
+    window.setTimeout(() => {
+      // 恢复历史期间不切：那时候虚拟列表还在量高度，正好是"上下闪"的来源。
+      // 等 restoring 结束由下面的 watch 接手。
+      if (session.restoring) return
+      renderMode.value = 'virtual'
+      nextTick(() => { follow(); jumpToBottom() })
+    }, 260)
+  }
+}, { immediate: true })
+
+// 进场恢复完成后，如果不在跑任务就切回虚拟列表（长会话省内存）。
+watch(() => session.restoring, busy => {
+  if (busy) return
+  if (session.isBusy) return
+  window.setTimeout(() => {
+    if (session.isBusy) return
+    renderMode.value = 'virtual'
+    nextTick(() => { follow(); jumpToBottom() })
+  }, 320)
+})
+
+// 独占模式下内容每变一次就贴底；虚拟模式交给原来的 follow()。
+// immediate：首帧就要有内容 —— 否则 own 模式下 nodes 还是空的，
+// 模板里 own-stream 与虚拟列表都不会渲染，出现一帧白屏。
+watch(blocks, () => {
+  if (renderMode.value === 'own') {
+    nodes.value = blocks.value.slice()
+    followOwn()
+  }
+}, { immediate: true })
+
+/**
+ * 「回到底部」按钮的显示条件：虚拟模式看 useAutoScroll 的 following，
+ * 独占模式看自己那套 ownFollowing（两条滚动链路互相独立，不能混用）。
+ */
+const showToBottom = computed(() => (
+  renderMode.value === 'own' ? !ownFollowing.value : !following.value
+))
+
+/** 两种渲染模式下的「回到底部」，所有调用点都走这里。 */
+function toBottom() {
+  if (renderMode.value === 'own') {
+    const list = ownScroller.value
+    if (!list) return
+    ownFollowing.value = true
+    list.scrollTop = list.scrollHeight
+    ownLastTop = list.scrollTop
+    return
+  }
+  jumpToBottom()
+}
+
 function syncDigitalLifeMode() {
   config.syncDigitalLifeEnabled()
   if (!session.isBusy) session.syncLifeMode()
@@ -156,6 +303,15 @@ watch(virtualScroller, value => {
 // 因为两个会话完全可能恰好拥有相同数量的时间线块。
 watch(() => session.viewRevision, () => nextTick(() => {
   following.value = true
+  // 独占模式（正在输出）切会话：直接对齐独占层，别去动虚拟列表。
+  if (renderMode.value === 'own') {
+    nodes.value = blocks.value.slice()
+    nextTick(() => {
+      ownFollowing.value = true
+      toBottom()
+    })
+    return
+  }
   settleVirtualBottom()
   jumpToBottom()
 }))
@@ -177,7 +333,7 @@ function revealNow() {
   if (revealTimer) { clearTimeout(revealTimer); revealTimer = null }
   nextTick(() => {
     settleVirtualBottom()
-    jumpToBottom()
+    toBottom()
     // 两帧后再确认一次：如果这期间引擎快照刚好开始替换时间线，就继续保持隐藏，
     // 否则会先把本机记录亮出来一瞬、再换引擎历史 —— 又是"闪一下"。
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -200,6 +356,19 @@ onBeforeUnmount(() => { if (revealTimer) { clearTimeout(revealTimer); revealTime
 // usage_update（输出 token 增长时持续推送）是可靠的「内容在变」信号，据此贴底。
 watch(() => session.usage?.output, () => follow(), { deep: false })
 watch(() => session.usage?.turnOutputTokens, () => follow(), { deep: false })
+/**
+ * 一轮结束：只 follow，不 jump。
+ *
+ * 旧实现是在收到 turn_end 时递增 viewRevision，而 viewRevision 的 watch 会
+ * `following = true` + `jumpToBottom()` —— 用户正往上翻历史时被硬拽回底部
+ * （1.5.4o4 第 3 项）。这里改成：只在「本来就跟随」的前提下补一次贴底，
+ * 用户已经脱离就绝不打扰；同时也避免跳转发生在内容仍在增长的瞬间。
+ */
+watch(() => session.runState, (state, previous) => {
+  if (state === 'idle' && previous !== 'idle') {
+    nextTick(() => { follow() })
+  }
+})
 watch([() => config.digitalLifeEnabled, () => config.lifeGlobalMode, () => session.isBusy], ([, , busy]) => {
   if (!busy) session.syncLifeMode()
 })
@@ -249,8 +418,34 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
       <!-- 插件浮层：绝对定位盖在会话区上方，pointer-events 由插件自己决定 -->
       <div class="plugin-overlay-layer"><PluginSlot name="chat-overlay" /></div>
 
+      <!--
+        两种渲染模式互斥，任何时刻只有一份 DOM 承载内容（1.5.4o5 第 7 项）：
+          · own     —— 对话中：全部时间线铺在一个普通滚动容器里，没有虚拟化，
+                        长度增长不会让虚拟列表算错偏移（历史被顶掉 / 内容被复制一份）。
+          · virtual —— 空闲时看历史：仍用虚拟列表，长会话只渲染屏幕内的条目。
+        切换只在「开始/结束一轮」时发生，中间不会来回跳。
+      -->
+      <div
+        v-if="renderMode === 'own' && nodes.length > 0"
+        ref="ownScroller"
+        class="stream own-stream"
+        :class="{ 'reveal-pending': !revealReady }"
+        @scroll.passive="onOwnScroll"
+        @touchstart.passive="onOwnTouchStart"
+        @touchend.passive="onOwnTouchEnd"
+      >
+        <div class="inner">
+          <TimelineBlock
+            v-for="(node, index) in nodes"
+            :key="node.key"
+            :block="node"
+            :live="index === nodes.length - 1 && session.isBusy"
+          />
+        </div>
+      </div>
+
       <DynamicScroller
-        v-if="blocks.length > 0"
+        v-else-if="blocks.length > 0"
         ref="virtualScroller"
         :items="blocks"
         key-field="key"
@@ -275,9 +470,6 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
           </DynamicScrollerItem>
         </template>
       </DynamicScroller>
-      <!-- 空态必须独立渲染：DynamicScroller 的 #empty 插槽是无条件渲染进滚动内容的
-           （不是「列表为空才渲染」），会一直贴在内容顶部把格言显示在对话上方。
-           这里回到以前的独立空态层：撑满可视区并按整块高度居中。 -->
       <main v-if="blocks.length === 0" class="stream" :class="{ 'reveal-pending': !revealReady }">
         <div class="inner empty-inner"><EmptyState /></div>
       </main>
@@ -294,26 +486,37 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
       />
 
       <Transition name="pop">
-        <button v-if="!following" class="to-bottom" aria-label="回到底部" @click="jumpToBottom">
+        <button v-if="showToBottom" class="to-bottom" aria-label="回到底部" @click="toBottom">
           <CoomiIcon name="arrowDown" :size="18" />
         </button>
       </Transition>
 
       <LoopProgressBar v-if="session.plan.active || (session.loop.active && session.plan.steps.length === 0)" />
-      <div v-if="session.retryConfirmation" class="retry-confirm">
-        <div><CoomiIcon name="alert" :size="16" /><span>{{ session.retryConfirmation }}</span></div>
-        <div class="retry-actions">
-          <button class="retry-secondary" @click="session.dismissRetry()">结束任务</button>
-          <button class="retry-primary" @click="session.retryInterruptedTurn()">继续重试</button>
+      <!-- 1.5.4o5 第 5 项：原来这两块是裸 div + v-if，插入时直接「啪」地出现，没有任何动画。
+           现在包进 Transition，复用已有的 pop 曲线（位移 + 轻微缩放 + 淡入）。 -->
+      <Transition name="sheet-pop">
+        <div v-if="session.retryConfirmation" class="retry-confirm">
+          <div class="retry-line">
+            <CoomiIcon name="alert" :size="16" />
+            <span class="retry-text">{{ session.retryConfirmation.message }}</span>
+            <!-- 第 4 项：报错代码就贴在提示旁边 -->
+            <code v-if="session.retryConfirmation.code" class="retry-code">{{ session.retryConfirmation.code }}</code>
+          </div>
+          <div class="retry-actions">
+            <button class="retry-secondary" @click="session.dismissRetry()">结束任务</button>
+            <button class="retry-primary" @click="session.retryInterruptedTurn()">继续重试</button>
+          </div>
         </div>
-      </div>
-      <div v-if="session.undoConfirm" class="retry-confirm">
-        <div><CoomiIcon name="arrowLeft" :size="16" /><span>确定回撤这一轮？将撤回该轮执行与产生的所有修改，并返回上一轮状态。</span></div>
-        <div class="retry-actions">
-          <button class="retry-secondary" @click="session.cancelUndo()">取消</button>
-          <button class="retry-primary" @click="session.confirmUndo()">确认回撤</button>
+      </Transition>
+      <Transition name="sheet-pop">
+        <div v-if="session.undoConfirm" class="retry-confirm">
+          <div class="retry-line"><CoomiIcon name="arrowLeft" :size="16" /><span class="retry-text">确定回撤这一轮？将撤回该轮执行与产生的所有修改，并返回上一轮状态。</span></div>
+          <div class="retry-actions">
+            <button class="retry-secondary" @click="session.cancelUndo()">取消</button>
+            <button class="retry-primary" @click="session.confirmUndo()">确认回撤</button>
+          </div>
         </div>
-      </div>
+      </Transition>
       <Transition name="pop">
         <button
           v-if="session.lifeUnread.length && session.isGlobalSession && session.mode === 'life' && !session.isBusy"
@@ -395,7 +598,8 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
    3D 透视会让整个子树进入一个全屏合成层，常开的话滚动和所有动画都在为它付代价 —
    这正是"还是卡的"的一部分原因。 */
 .chat.pushed {
-  perspective: 1400px;
+  /* 透视距离加大到 2000px：旋转同样角度时边缘拉伸更小，文字几乎不变形 */
+  perspective: 2000px;
   perspective-origin: left center;
 }
 .shell {
@@ -409,20 +613,26 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   /* 只过渡 transform：Android WebView 里 transform+border-radius 同时过渡会
      每帧重建合成层，表现为打开侧边栏时文字闪烁，而且明显掉帧。
      圆角直接切到位，不参与动画。
-     will-change 只在推开时才加（见 .shell.pushed），避免空闲时也常驻一张全屏层。 */
-  transition: transform .34s cubic-bezier(.22, .68, .19, 1);
+     1.5.4o5 第 8 项：缓动从 (0.22,0.68,0.19,1)（起步极快、尾段拖长）换成
+     material 的 emphasised(0.2,0,0,1) —— 前段加速均匀、后段干净收住，看起来
+     "顺"而不是"先窜出去再慢慢爬"。时长也从 340ms 收到 300ms。 */
+  transition: transform .3s cubic-bezier(.2, 0, 0, 1);
   /* 常驻合成层：如果等 .pushed 才加 will-change，浏览器要在动画第一帧现建图层，
      那一帧会卡一下（用户感知是"侧栏刚打开时顿一下"）。常驻的成本是一张屏幕大小的
      纹理，换来的是动画全程零重建。 */
   will-change: transform;
   backface-visibility: hidden;
+  /* 独立合成层：transform 动画全程不进主线程重排，第三方插件浮层也不会被牵连重绘。 */
+  contain: layout paint;
 }
 .shell.pushed {
   /* 先整体右移一个侧栏宽度，再绕左边缘侧翻 14°（右边缘后退）。
      角度刻意收敛到 14°：再大卡片会明显变窄，右侧露出大片空白。
      **不再 scale**：整块卡片的文字按 0.94 的非整数倍缩放时，WebView 每帧都要把
      整棵文字重新栅格化（还会发虚），这是侧栏动画发卡的主因之一。 */
-  transform: translateX(var(--drawer-w)) rotateY(14deg);
+  /* 角度收到 8°：每一点 3D 旋转都会让 WebView 把整块文字重新栅格化一次，
+     14° 时右侧文字的亚像素抖动肉眼可见。8° 仍有"卡片被掀开"的层次感，但栅格代价低得多。 */
+  transform: translateX(var(--drawer-w)) rotateY(8deg);
   border-radius: 18px;
   overflow: hidden;
   /* 卡片边缘：一圈描边 + 朝左的投影，让"被掀起来的卡片"有实体感，
@@ -463,6 +673,9 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   width: 100%; min-width: 0; min-height: 100%; padding: 10px 12px 18px; overflow-x: hidden;
 }
 .empty-inner { min-height: 100%; }
+/* 独占滚动层（对话中）：普通滚动容器，不做虚拟化。
+   它和 .virtual-stream 的滚动行为完全一致，所以切换时用户感知不到换了个容器。 */
+.own-stream { padding: 0; }
 .virtual-stream { width: 100%; min-width: 0; padding: 10px 12px 18px; }
 .virtual-item { width: 100%; min-width: 0; padding-bottom: 12px; }
 /* 虚拟列表回收历史 DOM 时不重播入场位移，否则滑过回收边界就像整页跳一下。
@@ -497,7 +710,21 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   color: var(--text-3); font-size: 12px;
 }
 
-.retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }.retry-confirm > div:first-child { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
+.retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }
+.retry-line { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
+.retry-text { flex: 1; min-width: 0; }
+/* 报错代码：等宽 + 橙色低饱和底，一眼能认出来但不会盖过正文 */
+.retry-code {
+  flex-shrink: 0; padding: 2px 7px; border-radius: 5px;
+  background: var(--orange-soft); color: var(--orange);
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .02em;
+}
+/* 重试/回撤弹层入场：从下方 10px 上浮 + 轻微放大，200ms 收住 ——
+   和输入区其它浮层同一套节奏（composer 的 .effort-pop / 指令面板）。 */
+.sheet-pop-enter-active { transition: opacity .2s ease, transform .22s cubic-bezier(.2,0,0,1); }
+.sheet-pop-leave-active { transition: opacity .14s ease, transform .14s ease; }
+.sheet-pop-enter-from { opacity: 0; transform: translateY(10px) scale(.97); }
+.sheet-pop-leave-to { opacity: 0; transform: translateY(4px) scale(.99); }
 .retry-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
 .retry-actions button { min-height: 34px; padding: 0 13px; border-radius: 6px; font-size: 13px; font-weight: 600; }
 .retry-secondary { background: var(--fill); color: var(--text-2); }
