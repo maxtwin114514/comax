@@ -79,7 +79,7 @@ Role::User => json!({"role": "user", "content": message.content})
 
 - 前端 `vue-tsc --noEmit` 通过；`vite build` 成功；
 - 引擎 `cargo check` / `cargo build --release --target aarch64-linux-android` 通过；
-- `assembleRelease` 成功：versionCode 92 / `1.5.5`，arm64-v8a，202.3 MB（202313045 B）；
+- `assembleRelease` 成功：versionCode 92 / `1.5.5`，arm64-v8a，202.3 MB（202313081 B）；
 - APK SHA-256 `566a575f9978045674d9dcba0e1b5891d4fc85c3215678c79f095704976392a1`；
 - APK 内实测：`web.zip` 含 `supportsVision`；`libcoomi.so` 与编译产物 MD5 一致
   （`6c77d9257fcb2fbd47fdc0b6eb01aa70`），二进制内含 `action=screenshot`；
@@ -92,5 +92,7 @@ Role::User => json!({"role": "user", "content": message.content})
   需要额外权限，全都要实测；
 - 「按模型名推断视觉」是保守白名单，必然会有漏判（未知多模态模型）与误判（同名文本模型）。
   两种情况都会退回可用的降级路径，但**都需要真机确认降级是否干净**；
-- 已有用户的 providers.json 不会被自动改写：如果他们之前保存过满屏 `vision: false`，
-  仍需要手动打开一次「图像理解」页签并保存，或删掉那条 override。
+- 已有用户的 providers.json **不会**被自动改写：配置页在**加载**时会过滤掉「三项恰好等于
+  默认值」的旧条目（`{text:true, vision:false, image_generation:false}`），所以只要打开一次
+  该 provider 并保存，满屏 false 就会被清掉；不打开则保持原样（引擎侧的名推断仍会生效，
+  因为 `vision:false` 现在不再压过它 —— 只有 `vision:true` 才算显式声明）。
