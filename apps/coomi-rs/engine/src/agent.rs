@@ -506,10 +506,19 @@ impl Agent {
                         self.run_checkpoint(session);
                         continue 'tool_rounds;
                     }
+                    // 1.5.5o1：带图请求的降级必须更积极。
+                    //
+                    // 实测：上游对 image_url 请求直接 502「Upstream service temporarily
+                    // unavailable」，而 502 是 retryable —— 旧逻辑要么打满重试次数，
+                    // 要么（开了无限重试）永久转圈。关键字匹配也认不出这种 502。
+                    //
+                    // 现在：带图请求**失败过一次之后**就剥图重试一次，把图降级成纯文本，
+                    // 让对话先能继续；同时记下 vision_degraded，后续请求不再重放图片。
                     Err(error)
                         if !image_retry_used
                             && request_has_images(&request)
-                            && is_image_compatibility_error(&error) =>
+                            && (is_image_compatibility_error(&error)
+                                || (is_transient_provider_error(&error) && retry_attempt >= 1)) =>
                     {
                         image_retry_used = true;
                         vision_replay = false;
@@ -522,8 +531,8 @@ impl Agent {
                             attempt: 1,
                             max_attempts: 1,
                             delay_ms: 0,
-                            message: "当前模型拒绝图片内容，正在切换为纯文本恢复".into(),
-                            code: "image_rejected".into(),
+                            message: "带图请求失败，正在切换为纯文本继续（图片仍保留在会话里）".into(),
+                            code: "image_degraded".into(),
                         });
                     }
                     Err(error)
@@ -580,15 +589,26 @@ impl Agent {
             } else {
                 Vec::new()
             };
-            let mut assistant_message = ChatMessage::assistant(
-                response_content.clone(),
-                recorded_tool_calls,
-            );
-            // 思考过程跟着这一轮的 assistant 消息一起落盘；空思考就不带这个字段。
-            if let Ok(mut sink) = reasoning_sink.lock() {
-                assistant_message.reasoning = std::mem::take(&mut *sink);
+            // 1.5.5o1：**空 assistant 消息不落盘**。
+            //
+            // 上游偶尔回 200 + 空 content（中转站吞响应体 / 全部内容塞进
+            // reasoning_content）。旧实现在这里无条件 push 一条空 assistant，
+            // 于是会话文件末尾就挂着一条 content 为空的记录 —— 重进会话时
+            // 前端把它渲染成一个空白气泡，看起来像「消息丢了」。
+            // 现在只有真的带内容（正文或工具调用）才落盘。
+            let has_payload = !response_content.trim().is_empty()
+                || !recorded_tool_calls.is_empty();
+            if has_payload {
+                let mut assistant_message = ChatMessage::assistant(
+                    response_content.clone(),
+                    recorded_tool_calls,
+                );
+                // 思考过程跟着这一轮的 assistant 消息一起落盘；空思考就不带这个字段。
+                if let Ok(mut sink) = reasoning_sink.lock() {
+                    assistant_message.reasoning = std::mem::take(&mut *sink);
+                }
+                session.messages.push(assistant_message);
             }
-            session.messages.push(assistant_message);
             session.context.observe_usage(
                 &response.usage,
                 &self.system_prompt,
@@ -642,6 +662,17 @@ impl Agent {
             if response_tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
                     continue;
+                }
+                // 1.5.5o1：空回复必须报错，不能当成成功。
+                //
+                // 上游 200 但 content 为空（中转站吞响应体、模型把内容全放进
+                // reasoning_content、max_tokens 截断）时，旧实现直接 `Ok("")` 返回，
+                // 前端收到空字符串：无消息、无报错、无重试 —— 用户看到的就是
+                // 「发出去了，没反应」。现在抛成可重试的上游错误，界面会显示原因。
+                if response_content.trim().is_empty() {
+                    return Err(AgentError::Provider(anyhow::anyhow!(
+                        "上游返回了空回复（content 与 tool_calls 都为空）。可能是中转站吞了响应体、                         模型把内容全部放进了 reasoning_content，或 max_tokens 过小被截断。"
+                    )));
                 }
                 session.touch();
                 return Ok(response_content);
@@ -1032,10 +1063,21 @@ fn should_retry(
     limit: u8,
     retry_forever: bool,
 ) -> bool {
+    // 1.5.5o1：**不可恢复错误一律不重试**，即使开了「无限重试」。
+    //
+    // 用户实测踩到的正是这里：Key 填错 / 模型名写错 / base_url 路径错都会返回 4xx，
+    // 旧实现把它们也丢进无限重试，界面永远转圈、永远看不到真实错误码 ——
+    // 用户唯一能感知的就是「连对话都用不了了」。
+    //
+    // 「无限重试」现在只对**瞬时故障**（超时 / 连接重置 / 429 / 5xx / 流中断）
+    // 无限次重试；鉴权、参数、模型不存在这类一改就好的问题立刻抛给用户。
+    if !is_transient_provider_error(error) {
+        return false;
+    }
     if retry_forever {
         return true;
     }
-    attempts_so_far < limit && is_transient_provider_error(error)
+    attempts_so_far < limit
 }
 
 fn is_transient_provider_error(error: &anyhow::Error) -> bool {

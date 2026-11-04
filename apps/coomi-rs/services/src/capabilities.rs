@@ -302,6 +302,27 @@ pub struct EndpointResolver {
     protocol: ProviderProtocol,
 }
 
+/// 路径末段是不是一个 API 版本段：`v1` / `v4` / `v1beta` / `v2alpha` 都算。
+///
+/// 判定刻意宽松（`v` + 至少一位数字 + 可选小写字母），因为各家的版本号写法
+/// 差别很大：OpenAI 是 `v1`，智谱是 `v4`，Gemini 是 `v1beta`。
+/// 只要末段长得像版本号，就认为 base_url 已经带好版本，不再补默认前缀。
+fn has_version_segment(segment: &str) -> bool {
+    let Some(rest) = segment.strip_prefix('v') else {
+        return false;
+    };
+    let mut chars = rest.chars().peekable();
+    let mut digits = 0_usize;
+    while matches!(chars.peek(), Some(value) if value.is_ascii_digit()) {
+        chars.next();
+        digits += 1;
+    }
+    if digits == 0 {
+        return false;
+    }
+    chars.all(|value| value.is_ascii_lowercase())
+}
+
 impl EndpointResolver {
     pub fn new(base_url: &str, protocol: ProviderProtocol) -> Self {
         let mut normalized = base_url.trim().trim_end_matches('/').to_owned();
@@ -336,13 +357,18 @@ impl EndpointResolver {
     }
 
     fn join_versioned(&self, default_suffix: &str, existing_version_suffix: &str) -> String {
+        // 1.5.5o1：版本段判定改成匹配「v + 数字 + 可选字母」（v1 / v4 / v1beta / v1alpha）。
+        //
+        // 旧实现只认 `v1 | v1beta`，于是内置预设里的智谱（`.../api/paas/v4`）被判成
+        // 「没有版本段」，探测地址被拼成 `.../api/paas/v4/v1/chat/completions` ——
+        // 一个不存在的地址，探测必然 404，能力集退回推断值，用户看到「不支持工具/看图」。
         let last = self
             .normalized_base
             .rsplit('/')
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let suffix = if matches!(last.as_str(), "v1" | "v1beta") {
+        let suffix = if has_version_segment(&last) {
             existing_version_suffix
         } else {
             default_suffix
@@ -615,6 +641,35 @@ mod tests {
             versioned.inference("m"),
             "https://example.test/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn endpoint_resolver_handles_non_v1_version_segments() {
+        // 智谱预设结尾是 v4：旧实现把探测拼成 .../v4/v1/chat/completions（404）。
+        let zhipu = EndpointResolver::new(
+            "https://open.bigmodel.cn/api/paas/v4",
+            ProviderProtocol::OpenAiCompatible,
+        );
+        assert_eq!(
+            zhipu.inference("glm"),
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+
+        // 没有版本段才补默认的 v1。
+        let bare =
+            EndpointResolver::new("https://api.openai.com", ProviderProtocol::OpenAiCompatible);
+        assert_eq!(
+            bare.inference("m"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+
+        // v1beta / v2alpha 也应当被识别为版本段。
+        assert!(has_version_segment("v1beta"));
+        assert!(has_version_segment("v2alpha"));
+        assert!(has_version_segment("v4"));
+        assert!(!has_version_segment("v"));
+        assert!(!has_version_segment("vx1"));
+        assert!(!has_version_segment("paas"));
     }
 
     #[test]

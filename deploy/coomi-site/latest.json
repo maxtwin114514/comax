@@ -1,22 +1,22 @@
 {
-  "version": "1.5.5",
-  "versionCode": 92,
+  "version": "1.5.5o1",
+  "versionCode": 93,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
-  "file": "Comax-1.5.5-complete-signed.apk",
-  "url": "https://api.monai.ccwu.cc/coomi/Comax-1.5.5-complete-signed.apk",
-  "sourceFile": "Comax-1.5.5-source.zip",
-  "size": 202313081,
-  "sha256": "c602e944569d4f188fd2cdaffc954a4431b7b49e7403e68c6bc3d05928519b2e",
-  "publishedAt": "2026-11-03T19:47:21Z",
-  "label": "下载 Comax 1.5.5",
+  "file": "Comax-1.5.5o1-complete-signed.apk",
+  "url": "https://api.monai.ccwu.cc/coomi/Comax-1.5.5o1-complete-signed.apk",
+  "sourceFile": "Comax-1.5.5o1-source.zip",
+  "size": 202317257,
+  "sha256": "a8f22efeeebc7ddffceb98433955b39d6c373e7a793dd8d97fac3f88bcaeab6e",
+  "publishedAt": "2026-11-04T22:40:00Z",
+  "label": "下载 Comax 1.5.5o1",
   "notes": [
-    "修复视觉模型看不见图：随消息发送的图片现在会真正进入请求（OpenAI / Responses / Anthropic / Gemini 四套协议分别转成 image_url、input_image、image、inlineData），不再被静默丢弃；之前图片只存进历史、请求里只剩一行文件路径。",
-    "修复 providers.json 里 supports_vision 一律为 false：配置保存不再给每个模型强行写 vision:false，加载时也会丢掉旧版本自动补的全默认条目；引擎改成「显式开关 → 模块名判断」两级兜底，gpt / claude / gemini / *-vl / multimodal 这类模型默认按视觉模型处理。",
-    "新增真正的截屏：控制模式的 screenshot 走无障碍 API（Android 11+），不需要 adb、不需要 MediaProjection 授权弹窗；截到的画面作为图片交给模型，而不是只读界面文字。read_screen 读不到的自绘界面、游戏、图片内容现在能直接看。",
-    "OCR 不可用时给出可执行替代：未装 tesseract 时明确建议改用看图，并给出 apt 安装命令，而不是只回一句「不可用」。",
-    "「图像理解」页签不再恒为空：模型列表按同一套视觉推断显示，用户能看到并勾选自己的视觉模型。",
-    "官网重做：改为极简排版，去掉装饰性动画与玻璃质感卡片，信息层级靠字号与留白建立；能力、对比、更新、下载与常见问题全部重写。"
+    "修复「连对话都用不了」的主因：开启了无限重试时，API Key 错误（401）、模型名错误（400/404）、base_url 路径错误（404）也会被无限重试，界面永远转圈、永远不显示真实错误码。现在不可恢复的错误一律立即抛给用户，无限重试只对超时、连接重置、429、5xx 这类瞬时故障生效。",
+    "修复空回复被当作成功：上游返回 200 但正文为空时（中转站吞响应体、模型把内容全放进 reasoning_content、max_tokens 截断），以前直接当成功返回，前端收到空字符串，无消息、无报错、无重试。现在会明确报错并说明成因。",
+    "修复会话里出现空白气泡：空 assistant 消息不再写入会话文件，重进会话不会再看到一条空记录。",
+    "修复带图请求失败后打满重试次数或永久转圈：实测上游对图片请求直接返回 502，而 502 属于可重试错误。现在带图请求失败一次就自动降级为纯文本继续，图片仍保留在会话里，后续请求也不再重放图片。",
+    "修复任务状态机不认「排队 → 已中断」：引擎重启或进程回收时，还在队列里的任务无法收尾，永远卡在排队状态，下一轮又被判定「已有任务在跑」。日志里刷满的 invalid task transition Queued -> Interrupted 就是这个。",
+    "修复两套 URL 拼接规则互相矛盾：真实对话在手输裸域名时会漏掉 /v1 导致 404；能力探测只认 /v1 与 /v1beta，于是内置的智谱预设（结尾是 /v4）被拼成不存在的地址，能力探测必然失败、用户看到「不支持工具与看图」。现在版本段统一按 v + 数字判定，裸域名才补默认前缀。"
   ]
 }

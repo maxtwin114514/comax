@@ -1768,10 +1768,27 @@ impl ResponsesStreamState {
 fn endpoint(base_url: &str, suffix: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with(suffix) {
-        base_url.to_string()
-    } else {
-        format!("{base_url}/{suffix}")
+        return base_url.to_string();
     }
+    // 1.5.5o1：只有「裸域名」才补默认版本段。
+    //
+    // 用户手输 `https://api.openai.com`（不带 /v1）时，旧实现拼出
+    // `/chat/completions` —— 404，而且配置页自检全过，最难自查。
+    //
+    // 但**不能**给所有带路径的都补 /v1：像 `https://api.longcat.chat/openai`、
+    // `https://open.bigmodel.cn/api/paas/v4` 这类网关，路径本身就是端点前缀，
+    // 硬插 /v1 会把本来能用的配置弄坏。所以只在「协议+主机+可选端口」这种
+    // 完全没有路径的情况下补一段，其余一律原样使用。
+    let after_scheme = base_url.split_once("://").map(|(_, rest)| rest).unwrap_or(base_url);
+    let has_path = after_scheme.contains('/');
+    if has_path {
+        return format!("{base_url}/{suffix}");
+    }
+    let prefix = match suffix.split('/').next().unwrap_or_default() {
+        "v1beta" => "v1beta",
+        _ => "v1",
+    };
+    format!("{base_url}/{prefix}/{suffix}")
 }
 
 async fn checked_json(response: Response, phase: &'static str) -> Result<Value> {

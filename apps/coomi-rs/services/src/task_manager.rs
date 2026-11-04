@@ -61,7 +61,13 @@ impl TaskStatus {
         use TaskStatus as S;
         matches!(
             (self, next),
-            (S::Queued, S::WaitingLock | S::Running | S::Cancelled)
+            // 1.5.5o1：Queued → Interrupted 也是合法收尾。
+            //
+            // 实测日志里刷满了 `invalid task transition Queued -> Interrupted`：
+            // 任务还在队列里就被中断（引擎重启、用户切走、进程回收）时必须能收尾，
+            // 旧状态机不认这条边，于是任务永远卡在 Queued、下一轮又被判「已有一个
+            // 任务在跑」，最后表现成「连对话都用不了」。
+            (S::Queued, S::WaitingLock | S::Running | S::Cancelled | S::Interrupted)
                 | (
                     S::WaitingLock,
                     S::Running | S::PausePending | S::Cancelled | S::Interrupted | S::Conflict
@@ -737,9 +743,12 @@ impl TaskManager {
             .unwrap_or_else(|value| value.into_inner())
             .values()
             .filter(|record| {
+                // Queued 也要收：引擎重启时还排在队列里的任务没有任何执行者了，
+                // 不收就成了「永久占位」，下一个任务永远排不上（1.5.5o1）。
                 matches!(
                     record.status,
-                    TaskStatus::Running
+                    TaskStatus::Queued
+                        | TaskStatus::Running
                         | TaskStatus::WaitingLock
                         | TaskStatus::PausePending
                         | TaskStatus::AwaitingApproval
