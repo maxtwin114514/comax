@@ -1,22 +1,21 @@
 {
-  "version": "1.5.5o1",
-  "versionCode": 93,
+  "version": "1.5.5o2",
+  "versionCode": 94,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
-  "file": "Comax-1.5.5o1-complete-signed.apk",
-  "url": "https://api.monai.ccwu.cc/coomi/Comax-1.5.5o1-complete-signed.apk",
-  "sourceFile": "Comax-1.5.5o1-source.zip",
-  "size": 202317257,
-  "sha256": "a8f22efeeebc7ddffceb98433955b39d6c373e7a793dd8d97fac3f88bcaeab6e",
-  "publishedAt": "2026-11-04T22:40:00Z",
-  "label": "下载 Comax 1.5.5o1",
+  "file": "Comax-1.5.5o2-complete-signed.apk",
+  "url": "https://api.monai.ccwu.cc/coomi/Comax-1.5.5o2-complete-signed.apk",
+  "sourceFile": "Comax-1.5.5o2-source.zip",
+  "size": 202318280,
+  "sha256": "0a801186b187d781e78be5e2f09721b936f54bdf414f7f9b44b1194cebed8e87",
+  "publishedAt": "2026-11-05T04:10:00Z",
+  "label": "下载 Comax 1.5.5o2",
   "notes": [
-    "修复「连对话都用不了」的主因：开启了无限重试时，API Key 错误（401）、模型名错误（400/404）、base_url 路径错误（404）也会被无限重试，界面永远转圈、永远不显示真实错误码。现在不可恢复的错误一律立即抛给用户，无限重试只对超时、连接重置、429、5xx 这类瞬时故障生效。",
-    "修复空回复被当作成功：上游返回 200 但正文为空时（中转站吞响应体、模型把内容全放进 reasoning_content、max_tokens 截断），以前直接当成功返回，前端收到空字符串，无消息、无报错、无重试。现在会明确报错并说明成因。",
-    "修复会话里出现空白气泡：空 assistant 消息不再写入会话文件，重进会话不会再看到一条空记录。",
-    "修复带图请求失败后打满重试次数或永久转圈：实测上游对图片请求直接返回 502，而 502 属于可重试错误。现在带图请求失败一次就自动降级为纯文本继续，图片仍保留在会话里，后续请求也不再重放图片。",
-    "修复任务状态机不认「排队 → 已中断」：引擎重启或进程回收时，还在队列里的任务无法收尾，永远卡在排队状态，下一轮又被判定「已有任务在跑」。日志里刷满的 invalid task transition Queued -> Interrupted 就是这个。",
-    "修复两套 URL 拼接规则互相矛盾：真实对话在手输裸域名时会漏掉 /v1 导致 404；能力探测只认 /v1 与 /v1beta，于是内置的智谱预设（结尾是 /v4）被拼成不存在的地址，能力探测必然失败、用户看到「不支持工具与看图」。现在版本段统一按 v + 数字判定，裸域名才补默认前缀。"
+    "修复 422 不触发降级：请求被网关拒绝时，旧实现只对 400 走「逐级削减参数」的降级阶梯，422 直接失败。而大量兼容网关（FastAPI 系、部分中转）对未识别字段返回的正是 422，导致 reasoning_effort、top_k、tool_choice 一旦不被接受就整轮失败。现在 400 与 422 同等对待。",
+    "新增一级降级：只去掉 tool_choice、保留 tools。相当多网关接受 tools 但拒绝 tool_choice，旧阶梯没有这一步，只能一路删到连 tools 都没了——表现为「模型突然不会用工具了」，且用户完全无从判断。",
+    "修复报错只剩一句「provider rejected the request」：422 与 400 现在都会附带上游返回的原始响应摘要（放宽到 400 字符）与错误码，能直接看到 model_not_found / invalid_request_error 这类真实原因。",
+    "修复报错显示的原因不是最后那个：降级阶梯里每级的响应体过去被直接丢弃，最终报错用的永远是最初那条 400 的原因。现在保留最后一次失败的响应体与状态码，报的就是真正卡住请求的那条。",
+    "全档降级到放弃工具时写引擎日志：如果所有尝试都保不住 tools，会在日志里明确记下「下一轮不带工具调用」，避免「这轮为什么没调工具」无从追查。"
   ]
 }

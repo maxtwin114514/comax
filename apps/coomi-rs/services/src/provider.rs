@@ -978,7 +978,9 @@ impl HttpModelProvider {
             .send()
             .await
             .map_err(|error| transport_error("request_send", error))?;
-        if response.status().as_u16() != 400 {
+        // 1.5.5o2：422 与 400 同等对待，都要进入降级阶梯。
+        let initial_status = response.status().as_u16();
+        if initial_status != 400 && initial_status != 422 {
             return Ok(response);
         }
 
@@ -991,6 +993,8 @@ impl HttpModelProvider {
             .map_err(|error| transport_error("response_body", error))?;
 
         // 阶梯：记录每次递减的 body，去重后依次尝试。
+        let mut last_status: Option<u16> = None;
+        let mut last_body = String::new();
         let mut steps: Vec<Value> = Vec::new();
         let mut push_step = |value: Value, steps: &mut Vec<Value>| {
             if value != *body {
@@ -1032,6 +1036,24 @@ impl HttpModelProvider {
             },
             &mut steps,
         );
+        // 1.5.5o2：新增一级「只去掉 tool_choice、保留 tools」。
+        //
+        // 相当多兼容网关（含部分国内中转）接受 `tools` 但拒绝 `tool_choice`，
+        // 会回 400/422 说 tool_choice 不被支持。旧阶梯没有这一步，只能一路删到
+        // 连 tools 都没了 —— 结果是「模型突然不会用工具了」，用户完全无从判断。
+        push_step(
+            {
+                let mut value = body.clone();
+                remove_reasoning_fields(&mut value);
+                remove_json_field(&mut value, "top_k");
+                remove_json_field(&mut value, "parallel_tool_calls");
+                remove_json_field(&mut value, "tool_choice");
+                value
+            },
+            &mut steps,
+        );
+        // 最后一级才是放弃工具调用能力 —— 只在上面的尝试全部失败后才会走到，
+        // 且落一条日志，方便排查「这轮为什么没调工具」。
         push_step(
             {
                 let mut value = body.clone();
@@ -1054,21 +1076,47 @@ impl HttpModelProvider {
                 .send()
                 .await
                 .map_err(|error| transport_error("request_send", error))?;
-            if retry.status().as_u16() != 400 {
+            // 1.5.5o2：422 也要走降级阶梯。
+            //
+            // 旧实现只对 400 做降级，而大量网关（FastAPI 系、部分 OpenAI 兼容中转）
+            // 对「未识别字段 / 参数取值非法」返回的是 **422**。于是这些站点上：
+            //   · reasoning_effort / top_k / parallel_tool_calls 一旦不被接受，
+            //     请求直接失败，后面那五级降级一次都不会执行；
+            //   · 用户看到的永远是 422，且错误详情被抹成一句话（见下一条）。
+            // 这是「全部调用都 422/400、又不是模型问题」的主因。
+            let status = retry.status().as_u16();
+            if status != 400 && status != 422 {
                 return Ok(retry);
             }
-            // 读走 body 以便复用连接，仅保留首个错误详情。
-            let _ = retry.text().await;
+            // 最后一级会连 tools 一起删掉：模型这轮将无法调用任何工具。
+            // 这必须留在引擎日志里，否则「模型突然变笨」无从追查。
+            if !fallback.get("tools").is_some() && body.get("tools").is_some() {
+                eprintln!(
+                    "[provider] all degradation steps failed to keep tools;                      the next attempt runs without tool calling (model={})",
+                    body.get("model").and_then(Value::as_str).unwrap_or("?")
+                );
+            }
+            // 1.5.5o2：**保留最后一次失败的响应体**，而不是丢弃。
+            //
+            // 旧实现每级降级只 `let _ = retry.text()` 就把 body 丢了，最终报错用的
+            // 永远是最初那条 400 的 detail。于是用户看到的原因和「实际最后失败的原因」
+            // 可能完全不同 —— 这也是「不知道为什么」的一部分。
+            last_status = Some(status);
+            last_body = retry.text().await.unwrap_or_default();
         }
 
         Err(ProviderRequestError {
             phase: "response_body",
             kind: ProviderErrorKind::Http,
-            status: Some(first_status.as_u16()),
+            // 报最后一个失败的状态码与 body：那才是真正卡住请求的原因。
+            status: last_status.or(Some(first_status.as_u16())),
             retry_after_ms: first_retry_after_ms,
             request_id: first_request_id,
             retryable: false,
-            detail: safe_http_error_detail(first_status.as_u16(), &first_body),
+            detail: match last_status {
+                Some(status) => safe_http_error_detail(status, &last_body),
+                None => safe_http_error_detail(first_status.as_u16(), &first_body),
+            },
         }
         .into())
     }
@@ -1907,11 +1955,15 @@ fn safe_http_error_detail(status: u16, body: &str) -> String {
         Some(code) => format!("{summary} (code={code})"),
         None => summary.to_owned(),
     };
-    // 400/405 时附带响应体摘要，便于定位 ZCode/智谱等代理的具体拒绝原因。
-    if status == 400 || status == 405 {
+    // 400/422/405 时附带响应体摘要，便于定位 ZCode/智谱等代理的具体拒绝原因。
+    //
+    // 1.5.5o2：加上 422 并把摘要长度放宽到 400 字符。
+    // 旧实现只对 400/405 附带原文，422 只回一句「provider rejected the request」——
+    // 用户拿到的就是「不知道为什么」。
+    if matches!(status, 400 | 405 | 422) {
         let detail = body.trim();
-        let truncated: String = if detail.len() > 220 {
-            detail.chars().take(220).collect()
+        let truncated: String = if detail.len() > 400 {
+            detail.chars().take(400).collect()
         } else {
             detail.to_owned()
         };
