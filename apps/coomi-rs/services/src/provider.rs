@@ -992,6 +992,26 @@ impl HttpModelProvider {
             .await
             .map_err(|error| transport_error("response_body", error))?;
 
+        // 1.5.5o3：报文结构错误（messages 里混进裸字符串、role 缺失等）**立刻返回**，
+        // 不进降级阶梯。
+        //
+        // 降级阶梯只会删参数（reasoning / top_k / tool_choice / tools），而结构错误
+        // 无论删多少个字段都还在。旧行为是：一次请求要白跑 6 轮，每轮都发一遍
+        // 几十 KB 的历史，用户盯着转圈，最后拿到的还是同一条错误。
+        // 立即失败既省时间，也让这条错误保持原样（便于对照排查）。
+        if is_request_shape_error(&first_body.to_ascii_lowercase()) {
+            return Err(ProviderRequestError {
+                phase: "response_body",
+                kind: ProviderErrorKind::Http,
+                status: Some(first_status.as_u16()),
+                retry_after_ms: first_retry_after_ms,
+                request_id: first_request_id,
+                retryable: false,
+                detail: safe_http_error_detail(first_status.as_u16(), &first_body),
+            }
+            .into());
+        }
+
         // 阶梯：记录每次递减的 body，去重后依次尝试。
         let mut last_status: Option<u16> = None;
         let mut last_body = String::new();
@@ -1903,6 +1923,26 @@ fn response_request_id(headers: &HeaderMap) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// 上游明确说「你的 messages 结构不对」。
+///
+/// 典型文案：`invalid type: string "你好", expected internally tagged enum
+/// ChatCompletionRequestMessage`、`messages[1]: invalid type`、
+/// `expected a message object`。这类错误与模型参数无关，重试和降级都不可能成功。
+fn is_request_shape_error(lower_body: &str) -> bool {
+    const STRONG: [&str; 3] = [
+        "internally tagged enum",
+        "chatcompletionrequestmessage",
+        "expected a message object",
+    ];
+    if STRONG.iter().any(|needle| lower_body.contains(needle)) {
+        return true;
+    }
+    // `messages[1]: invalid type` 这类定位式报错也算 —— 但必须同时出现
+    // 「messages 下标」与「类型不对」，否则普通参数错误容易误判。
+    lower_body.contains("messages[")
+        && (lower_body.contains("invalid type") || lower_body.contains("expected "))
+}
+
 fn safe_http_error_detail(status: u16, body: &str) -> String {
     let lower = body.to_ascii_lowercase();
     let summary = if ["image_url", "input_image", "inline_data", "media_type"]
@@ -1920,6 +1960,13 @@ fn safe_http_error_detail(status: u16, body: &str) -> String {
         || lower.contains("too many tokens")
     {
         "provider context_window_exceeded"
+    } else if is_request_shape_error(&lower) {
+        // 1.5.5o3：报文结构错误（messages 里混进裸字符串、role 缺失等）。
+        //
+        // 这类错误**改参数永远修不好**，降级阶梯的每一级都会以同样理由失败，
+        // 用户看到的却是「重试了 6 次还是 422」。单独归类，让日志一眼能看出
+        // 「这是我们自己拼错了请求体」，而不是去怀疑模型或上游。
+        "provider request body is not valid for this gateway (message shape)"
     } else if status == 429
         || lower.contains("rate limit")
         || lower.contains("tpm")
@@ -2040,7 +2087,21 @@ fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Ve
             // 旧版这里直接返回纯文本 content —— 用户拖进来的截图/图片被**静默丢掉**，
             // 模型只看到一行「请读取这些已导入文件：/path/xxx.png」，于是只能去
             // 调 OCR，而 OCR 只认字、认不出画面。看起来就是「视觉模型也不会看图」。
-            Role::User => openai_user_content(message, supports_vision),
+            //
+            // 1.5.5o3：必须把 content **包进消息对象**。
+            //
+            // 这段 match 求值出来的是「整个 message 对象」，不是 content 本身。
+            // 视觉改造时把 openai_user_content(...) 直接当作分支返回值，等于把
+            // 字符串/数组塞进了 messages 数组 —— 线上请求体变成
+            //   "messages":[{"role":"system",...}, "你好", ...]
+            // 用的是 Rust serde internally-tagged enum 的网关会直接反序列化失败：
+            //   invalid type: string "你好", expected internally tagged enum
+            //   ChatCompletionRequestMessage
+            // 且这是**报文结构错误**，重试/降级/换模型全都没用，所以每个请求都 422。
+            Role::User => json!({
+                "role": "user",
+                "content": openai_user_content(message, supports_vision),
+            }),
             Role::Assistant => {
                 // 空 assistant 轮（content 与 tool_calls 均为空）不带任何信息，
                 // 部分 OpenAI 兼容端点（如 DeepSeek 官方）会直接 400 拒绝
@@ -2440,8 +2501,20 @@ fn parse_argument_text(input: &str) -> Result<Value> {
     // 而下一轮模型又把 JSON 写完整了 —— 现象就是「莫名其妙出现、又莫名其妙消失」。
     // 现在只在文本**确实是完整 JSON**（允许被 ```json 包着）时才接受，
     // 否则明确报错，由上层做一次带提示的重试。
+    //
+    // 1.5.5o3：但「整段不是 JSON」和「截断」是两件事。不少模型会把参数包在
+    // 一句话里（`I will use these arguments: {...}.`），这是完整对象，只是带
+    // 了客套壳子 —— 直接判死会让用户看到「工具参数错误」，而下一轮模型换个
+    // 写法又好了，正是「莫名其妙出现又消失」。
+    // extract_json_object 只接受**恰好一个完整对象**：多个对象 / 无对象都返回
+    // None，截断的也不会配平，因此不会重新引入「拿前半截当合法参数」的老问题。
     if looks_truncated_json(trimmed) {
         anyhow::bail!("tool arguments were truncated (incomplete JSON object)");
+    }
+    if let Some(object) = extract_json_object(trimmed)
+        && let Ok(value) = serde_json::from_str(object)
+    {
+        return Ok(value);
     }
     anyhow::bail!("tool arguments are not valid JSON")
 }
@@ -2847,6 +2920,154 @@ mod tests {
         assert_eq!(usage.cache_observed_input_tokens, 102_000);
         assert!(usage.cache_data_available);
         assert!(usage.cached_input_tokens <= usage.cache_observed_input_tokens);
+    }
+
+    /// 完整会话（含图、含工具轮、含内部上下文）打出来的请求体，
+    /// 必须能通过「internally tagged enum」式的严格反序列化。
+    ///
+    /// 这就是 1.5.5o3 用户遇到的那条线上错误：
+    ///   invalid type: string "你好", expected internally tagged enum
+    ///   ChatCompletionRequestMessage
+    /// 只在「user 消息恰好是 messages[1]」时暴露，单条消息的单元测试抓不住，
+    /// 所以这里按真实顺序构造完整历史。
+    #[test]
+    fn request_body_survives_strict_tagged_deserialization() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(tag = "role", rename_all = "lowercase")]
+        #[allow(dead_code)]
+        enum TaggedMessage {
+            System { content: Value },
+            User { content: Value },
+            Assistant {
+                #[serde(default)]
+                content: Value,
+                #[serde(default)]
+                tool_calls: Option<Value>,
+            },
+            Tool {
+                content: Value,
+                tool_call_id: String,
+            },
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct StrictBody {
+            model: String,
+            messages: Vec<TaggedMessage>,
+        }
+
+        let call = ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: json!({"path": "README.md"}),
+        };
+        let mut user_with_image = ChatMessage::user("这张图里是什么");
+        user_with_image.images.push(coomi_engine::ImageContent {
+            media_type: "image/png".into(),
+            data: "BASE64".into(),
+        });
+        let history = vec![
+            ChatMessage::system("你是一个助手"),
+            ChatMessage::user("你好"),
+            ChatMessage::assistant("在的", Vec::new()),
+            ChatMessage::user("看看这个文件"),
+            ChatMessage::assistant("", vec![call]),
+            ChatMessage::tool("call-1", "file content"),
+            ChatMessage::internal_user("继续"),
+            user_with_image,
+            ChatMessage::assistant("这是一张截图", Vec::new()),
+        ];
+
+        for supports_vision in [false, true] {
+            let body = json!({
+                "model": "strict-gateway-model",
+                "messages": openai_messages(&history, supports_vision).expect("render"),
+                "stream": true,
+            });
+            // 先做结构断言：每一项都是对象、都带 role。
+            for (index, message) in body["messages"].as_array().expect("array").iter().enumerate() {
+                assert!(message.is_object(), "messages[{index}] 不是对象：{message}");
+                assert!(
+                    message.get("role").and_then(Value::as_str).is_some(),
+                    "messages[{index}] 缺 role：{message}"
+                );
+            }
+            // 再用最严格的形态反序列化一次：任何一个裸字符串都会在这里炸掉。
+            serde_json::from_value::<StrictBody>(body.clone()).unwrap_or_else(|error| {
+                panic!("supports_vision={supports_vision} 请求体无法被严格网关接受：{error}\n{body}")
+            });
+        }
+
+        // 负向对照：证明上面的断言真的能抓住这个 bug。
+        // 1.5.5 的写法等价于把 content 直接塞进数组，这里是它的最小复现。
+        let buggy = json!({
+            "model": "strict-gateway-model",
+            "messages": [
+                {"role": "system", "content": "你是一个助手"},
+                "你好"
+            ],
+        });
+        let error = serde_json::from_value::<StrictBody>(buggy)
+            .expect_err("裸字符串必须被拒绝，否则这个测试没有保护作用");
+        assert!(
+            error.to_string().contains("invalid type: string"),
+            "错误信息应指向字符串类型不匹配，实际：{error}"
+        );
+    }
+
+    /// 上游报「messages 结构不对」时要能被单独识别出来。
+    ///
+    /// 1.5.5o3 线上原文：
+    ///   Failed to deserialize the JSON body into the target type:
+    ///   messages[1]: invalid type: string "你好",
+    ///   expected internally tagged enum ChatCompletionRequestMessage
+    #[test]
+    fn request_shape_errors_are_classified_separately() {
+        let upstream = r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[1]: invalid type: string \"你好\", expected internally tagged enum ChatCompletionRequestMessage at line 1 column 24286","type":"invalid_request_error","code":"invalid_request_error"}}"#;
+        let detail = safe_http_error_detail(422, upstream);
+        assert!(
+            detail.contains("message shape"),
+            "报文结构错误必须单独归类，实际：{detail}"
+        );
+        // 普通参数错误不能被误判成报文结构错误。
+        let other = r#"{"error":{"message":"Unsupported parameter: reasoning_effort"}}"#;
+        let detail = safe_http_error_detail(422, other);
+        assert!(!detail.contains("message shape"), "误判：{detail}");
+    }
+
+    #[test]
+    fn openai_messages_are_always_tagged_objects() {
+        // 1.5.5 的视觉改造把 user 分支写成「直接返回 content」，
+        // 于是 messages 数组里混进了裸字符串，上游 serde 直接反序列化失败：
+        //   invalid type: string "你好", expected internally tagged enum
+        //   ChatCompletionRequestMessage
+        // 每个请求都 422，换模型/重试/降级全无效。这里锁死结构不变量。
+        let history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("你好"),
+            ChatMessage::assistant("hi", Vec::new()),
+        ];
+        for supports_vision in [false, true] {
+            let rendered = openai_messages(&history, supports_vision).expect("render messages");
+            assert_eq!(rendered.len(), 3);
+            for (index, message) in rendered.iter().enumerate() {
+                assert!(
+                    message.is_object(),
+                    "messages[{index}] 必须是对象，实际是 {message}"
+                );
+                assert!(
+                    message.get("role").and_then(Value::as_str).is_some(),
+                    "messages[{index}] 缺少 role 字段：{message}"
+                );
+                assert!(
+                    !message.get("content").is_none_or(Value::is_null),
+                    "messages[{index}] 缺少 content 字段：{message}"
+                );
+            }
+            assert_eq!(rendered[1]["role"], "user");
+            assert_eq!(rendered[1]["content"], "你好");
+        }
     }
 
     #[test]
